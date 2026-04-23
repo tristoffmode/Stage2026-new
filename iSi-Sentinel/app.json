@@ -1,0 +1,59 @@
+{
+  "expo": {
+    "name": "iSi-Sentinel",
+    "slug": "iSi-Sentinel",
+    "version": "1.0.8",
+    "orientation": "portrait",
+    "icon": "./assets/images/iSi_sentinel_logo.jpg",
+    "scheme": "myapp",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.boudier.isisentinel"
+    },
+    "android": {
+      "package": "com.boudier.isisentinel",
+      "versionCode": 8,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/iSi_sentinel_logo.jpg"
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/iSi_Sentinel_sans_bg.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
+      [
+        "expo-network-security-config",
+        {
+          "xmlPath": "./assets/android/network_security_config.xml"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "589f63c9-0e25-4d23-93fa-3d4bdfc8cb22"
+      }
+    },
+    "runtimeVersion": "1.0.0",
+    "updates": {
+      "url": "https://u.expo.dev/589f63c9-0e25-4d23-93fa-3d4bdfc8cb22"
+    }
+  }
+}

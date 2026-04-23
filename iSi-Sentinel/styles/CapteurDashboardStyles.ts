@@ -1,0 +1,70 @@
+import { StyleSheet, Platform } from 'react-native';
+
+export default StyleSheet.create({
+  conteneur: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
+  },
+  titre: {
+    fontSize: 24,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginVertical: 15,
+    color: '#333',
+  },
+  conteneurFiltresFixe: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ddd',
+    zIndex: 1000,
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  scrollView: {
+    flex: 1,
+  },
+  contenuScrollView: {
+    paddingTop: Platform.OS === 'web' ? 50 : Platform.OS === 'ios' ? 100 : 120,
+    paddingBottom: 20,
+  },
+  searchContainer: {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  right: 0,
+  backgroundColor: '#fff',
+  paddingHorizontal: 10,
+  paddingVertical: 10,
+  zIndex: 4000,
+  borderBottomWidth: 1,
+  borderBottomColor: '#eee',
+  elevation: 3,
+},
+searchInputContainer: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  backgroundColor: '#f5f5f5',
+  borderRadius: 10,
+  paddingHorizontal: 10,
+},
+searchInput: {
+  flex: 1,
+  height: 40,
+  fontSize: 16,
+  color: '#333',
+  paddingLeft: 5,
+},
+searchIcon: {
+  marginRight: 5,
+},
+});

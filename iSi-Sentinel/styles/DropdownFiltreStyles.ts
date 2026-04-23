@@ -7,8 +7,8 @@ export default StyleSheet.create({
 	},
 	etiquette: {
 		fontSize: 16,
-		fontWeight: '600',
-		color: '#333',
+		fontWeight: '700',
+		color: '#00000c',
 		marginBottom: 8,
 	},
 	dropdown: {

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, StyleSheet, TouchableOpacity, Text, Platform } from 'react-native';
+import { View, StyleSheet, TouchableOpacity, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -16,7 +16,8 @@ const StatistiqueCapteurs = () => {
 	const headerHeight = useHeaderHeight();
 	const [modalVisible, setModalVisible] = useState<boolean>(false);
 	const isWeb = Platform.OS === 'web';
-	const buttonBottomPosition = isWeb ? 22 : (insets.bottom + 16);
+	const tabBarClearance = Platform.OS === 'ios' ? 84 : 76;
+	const buttonBottomPosition = isWeb ? 22 : (insets.bottom + tabBarClearance);
 	const topOffset = isWeb ? Math.max(64, headerHeight) : Math.max(8, headerHeight - 56);
 
 	return (
@@ -46,9 +47,9 @@ const StatistiqueCapteurs = () => {
 					<TouchableOpacity
 						style={styles.boutonEnvoiMail}
 						onPress={() => setModalVisible(true)}
+						accessibilityLabel="Envoyer les statistiques par mail"
 					>
-						<MaterialIcons name="email" size={24} color="#fff" />
-						<Text style={styles.texteBouton}>Envoyer</Text>
+						<MaterialIcons name="email" size={22} color="#fff" />
 					</TouchableOpacity>
 				</View>
 
@@ -74,28 +75,21 @@ const styles = StyleSheet.create({
 	boutonContainer: {
 		left: 0,
 		right: 0,
-		alignItems: 'center',
+		alignItems: 'flex-end',
+		paddingHorizontal: 18,
 	},
 	boutonEnvoiMail: {
-		height: 50,
-		minWidth: 120,
-		paddingHorizontal: 20,
+		height: 48,
+		width: 48,
 		backgroundColor: '#0a7ea4',
-		borderRadius: 25,
+		borderRadius: 24,
 		elevation: 6,
 		shadowColor: '#000',
 		shadowOffset: { width: 0, height: 2 },
 		shadowOpacity: 0.25,
 		shadowRadius: 3.84,
-		flexDirection: 'row',
 		alignItems: 'center',
 		justifyContent: 'center',
-	},
-	texteBouton: {
-		color: '#ffffff',
-		fontWeight: '600',
-		fontSize: 16,
-		marginLeft: 8,
 	},
 });
 

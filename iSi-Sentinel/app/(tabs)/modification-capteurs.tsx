@@ -38,7 +38,6 @@ const ModificationCapteurs: React.FC = () => {
 	const router = useRouter();
 	const [capteurs, setCapteurs] = useState<Capteur[]>([]);
 	const [capteursFiltres, setCapteursFiltres] = useState<Capteur[]>([]);
-	const [sites, setSites] = useState<Site[]>([]);
 	const [refreshing, setRefreshing] = useState<boolean>(false);
 	const [searchTerm, setSearchTerm] = useState<string>('');
 	const bottomPadding = Platform.OS === 'android' ? 100 : 50;
@@ -149,7 +148,6 @@ const ModificationCapteurs: React.FC = () => {
 			const sitesData = await CapteurService.getSites();
 			const capteursData = await CapteurService.getCapteurs();
 
-			setSites(sitesData);
 			setCapteurs(capteursData);
 
 			setElementsEtablissement([
@@ -233,7 +231,7 @@ const ModificationCapteurs: React.FC = () => {
 		}
 	};
 
-	const renderGridItem = ({ item, index }) => {
+	const renderGridItem = ({ item, index }: { item: Capteur; index: number }) => {
 		return (
 			<View style={{
 				flex: 1,
@@ -398,7 +396,7 @@ const ModificationCapteurs: React.FC = () => {
 					statutMail: capteursFiltres[indexCapteurActuel]?.notif
 				} : null}
 				indexCapteur={indexCapteurActuel}
-				etablissement={capteursFiltres[indexCapteurActuel]?.site_name || ''}
+				etablissement={indexCapteurActuel !== null ? (capteursFiltres[indexCapteurActuel]?.site_name || '') : ''}
 				onSaveCapteur={sauvegarderCapteur}
 				onSuccess={fetchData}
 			/>

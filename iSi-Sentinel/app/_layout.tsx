@@ -6,38 +6,26 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const RootLayout: React.FC = () => {
 	const router = useRouter();
 
-	// Check authentication on app startup
-	useEffect(() => {
-		const checkUser = async () => {
-			try {
-				const isAuthenticated = await AuthService.isAuthenticated();
-				if (isAuthenticated) {
-					router.replace('/(tabs)/affichage-capteurs');
-				} else {
-					router.replace('/(auth)/login');
-				}
-			} catch (error) {
-				console.error("Erreur lors de la vérification de l'utilisateur :", error);
-				router.replace('/(auth)/login');
-			}
-		};
-		checkUser();
-	}, [router]);
-
-	// Initialize auth service
+	// Initialize auth service and perform initial routing once
 	useEffect(() => {
 		const setupAuth = async () => {
 			try {
 				await AuthService.initializeApiClient();
 				const isAuthenticated = await AuthService.checkExistingSession();
 				console.log('Session authenticated:', isAuthenticated);
+				if (isAuthenticated) {
+					router.replace('/(tabs)/affichage-capteurs');
+				} else {
+					router.replace('/(auth)/login');
+				}
 			} catch (error) {
 				console.error('Failed to initialize auth:', error);
+				router.replace('/(auth)/login');
 			}
 		};
 
 		setupAuth();
-	}, []);
+	}, [router]);
 
 	// Add AppState listener for handling background/foreground transitions
 	useEffect(() => {

@@ -65,9 +65,6 @@ export class StatistiqueService {
 				end_date: format(params.end_date, 'yyyy-MM-dd')
 			});
 
-			const url = `${API_URL}/api/releves`;
-			console.log('URL complète:', url);
-
 			const response = await this.axiosInstance.get('/api/releves', {
 				params: {
 					capteur_id: params.capteur_id,
@@ -95,7 +92,7 @@ export class StatistiqueService {
 				console.log(`Sampled down to ${data.length} records`);
 			}
 
-			data = data.filter(row =>
+			data = data.filter((row: any) =>
 				row &&
 				row.Date_Time &&
 				typeof row.Temperature === 'number'

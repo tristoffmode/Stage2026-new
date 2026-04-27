@@ -43,6 +43,8 @@ const StatistiqueCapteurFilters: React.FC<Props> = ({ topInset, onLayoutMeasured
 		return date.toISOString().split('T')[0];
 	};
 
+	const startDateMax = endDate < new Date() ? endDate : new Date();
+
 	const handleWebStartDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
 		const dateValue = e.target.value;
 		if (dateValue) {
@@ -162,7 +164,7 @@ const StatistiqueCapteurFilters: React.FC<Props> = ({ topInset, onLayoutMeasured
 										type="date"
 										value={formatDateForInput(startDate)}
 										onChange={handleWebStartDateChange}
-										max={formatDateForInput(new Date())}
+										max={formatDateForInput(startDateMax)}
 										style={{
 											fontSize: '16px',
 											padding: '6px',
@@ -227,7 +229,7 @@ const StatistiqueCapteurFilters: React.FC<Props> = ({ topInset, onLayoutMeasured
 						mode="date"
 						display="default"
 						onChange={onStartDateChange}
-						maximumDate={new Date()}
+						maximumDate={startDateMax}
 					/>
 				)}
 
@@ -304,7 +306,7 @@ const StatistiqueCapteurFilters: React.FC<Props> = ({ topInset, onLayoutMeasured
 								type="date"
 								value={formatDateForInput(startDate)}
 								onChange={handleWebStartDateChange}
-								max={formatDateForInput(new Date())}
+								max={formatDateForInput(startDateMax)}
 								style={{
 									fontSize: '16px',
 									padding: '8px',
@@ -366,7 +368,7 @@ const StatistiqueCapteurFilters: React.FC<Props> = ({ topInset, onLayoutMeasured
 						mode="date"
 						display="default"
 						onChange={onStartDateChange}
-						maximumDate={new Date()}
+						maximumDate={startDateMax}
 					/>
 				)}
 

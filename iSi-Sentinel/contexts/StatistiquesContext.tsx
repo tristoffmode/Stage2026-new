@@ -296,7 +296,13 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 			// Start date always begins at midnight
 			const d = new Date(selectedDate);
 			d.setHours(0, 0, 0, 0);
-			setStartDate(d);
+			if (d > endDate) {
+				const clamped = new Date(endDate);
+				clamped.setHours(0, 0, 0, 0);
+				setStartDate(clamped);
+			} else {
+				setStartDate(d);
+			}
 		}
 	};
 

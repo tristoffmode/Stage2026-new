@@ -186,6 +186,7 @@ const styles = StyleSheet.create({
     },
     conteneurModal: {
         width: '90%',
+		height: 'auto',
         backgroundColor: 'white',
         borderRadius: 15,
         padding: 20,
@@ -197,8 +198,8 @@ const styles = StyleSheet.create({
     },
     boutonFermer: {
         position: 'absolute',
-        right: 15,
-        top: 15,
+        right: 10,
+        top: 5,
         zIndex: 10,
     },
     titreModal: {

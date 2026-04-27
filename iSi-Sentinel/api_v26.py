@@ -241,13 +241,15 @@ def get_releves():
             start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
         else:
             start_date = datetime.now() - timedelta(days=7)  # Par défaut: 7 jours en arrière
-            
+
         if end_date_str:
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-            # Ajouter un jour à end_date pour inclure toute la journée
-            end_date = end_date + timedelta(days=1)
+            # Accepter un datetime complet (ISO) ou une date seule
+            try:
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%dT%H:%M:%S')
+            except ValueError:
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%d') + timedelta(days=1)
         else:
-            end_date = datetime.now() + timedelta(days=1)  # Par défaut: maintenant
+            end_date = datetime.now()  # Par défaut: maintenant (pas de données futures)
             
         # Filtrer les relevés par capteur, site ET dates
         releves = RelevesIoT.query.filter(

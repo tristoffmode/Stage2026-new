@@ -1,8 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, TextInput, Text, StyleSheet, Image, TouchableOpacity, Platform, Dimensions } from 'react-native';
 import { useRouter } from 'expo-router';
 import { AuthService } from '../../services/authService';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const REMEMBERED_USERNAME_KEY = 'remembered_username';
+const REMEMBERED_PASSWORD_KEY = 'remembered_password';
 
 const LoginScreen: React.FC = () => {
 	const placeholderColor = '#7a7a7a';
@@ -16,10 +20,79 @@ const LoginScreen: React.FC = () => {
 	const { width } = Dimensions.get('window');
 	const isWideScreen = isWeb && width > 768;
 
+	useEffect(() => {
+		const loadRememberedCredentials = async () => {
+			const savedStayLoggedIn = await AsyncStorage.getItem('stayLoggedIn');
+			if (savedStayLoggedIn !== 'true') {
+				return;
+			}
+
+			setStayLoggedIn(true);
+
+			const rememberedUsername = await AsyncStorage.getItem(REMEMBERED_USERNAME_KEY);
+			if (rememberedUsername) {
+				setUsername(rememberedUsername);
+			}
+
+			if (Platform.OS === 'web') {
+				const localRememberedUsername = localStorage.getItem(REMEMBERED_USERNAME_KEY);
+				if (!rememberedUsername && localRememberedUsername) {
+					setUsername(localRememberedUsername);
+				}
+			}
+		};
+
+		loadRememberedCredentials();
+	}, []);
+
+	const clearRememberedCredentials = async () => {
+		await AsyncStorage.removeItem(REMEMBERED_USERNAME_KEY);
+		await AsyncStorage.removeItem(REMEMBERED_PASSWORD_KEY);
+
+		if (Platform.OS === 'web') {
+			localStorage.removeItem(REMEMBERED_USERNAME_KEY);
+			localStorage.removeItem(REMEMBERED_PASSWORD_KEY);
+		}
+	};
+
+	const persistRememberedCredentials = async (savedUsername: string, savedPassword: string) => {
+		await AsyncStorage.setItem(REMEMBERED_USERNAME_KEY, savedUsername);
+		await AsyncStorage.setItem(REMEMBERED_PASSWORD_KEY, savedPassword);
+
+		if (Platform.OS === 'web') {
+			localStorage.setItem(REMEMBERED_USERNAME_KEY, savedUsername);
+			localStorage.setItem(REMEMBERED_PASSWORD_KEY, savedPassword);
+		}
+	};
+
 	const handleLogin = async () => {
-		const success = await AuthService.login(username, password, router, stayLoggedIn);
+		let passwordToUse = password;
+
+		if (stayLoggedIn && !passwordToUse) {
+			const rememberedUsername = await AsyncStorage.getItem(REMEMBERED_USERNAME_KEY);
+			const rememberedPassword = await AsyncStorage.getItem(REMEMBERED_PASSWORD_KEY);
+
+			if (rememberedUsername === username && rememberedPassword) {
+				passwordToUse = rememberedPassword;
+			} else if (Platform.OS === 'web') {
+				const webRememberedUsername = localStorage.getItem(REMEMBERED_USERNAME_KEY);
+				const webRememberedPassword = localStorage.getItem(REMEMBERED_PASSWORD_KEY);
+				if (webRememberedUsername === username && webRememberedPassword) {
+					passwordToUse = webRememberedPassword;
+				}
+			}
+		}
+
+		const success = await AuthService.login(username, passwordToUse, router, stayLoggedIn);
 		if (!success) {
 			console.log('Échec de la connexion');
+			return;
+		}
+
+		if (stayLoggedIn) {
+			await persistRememberedCredentials(username, passwordToUse);
+		} else {
+			await clearRememberedCredentials();
 		}
 	};
 
@@ -28,7 +101,12 @@ const LoginScreen: React.FC = () => {
 	};
 
 	const toggleStayLoggedIn = () => {
-		setStayLoggedIn(!stayLoggedIn);
+		const nextValue = !stayLoggedIn;
+		setStayLoggedIn(nextValue);
+
+		if (!nextValue) {
+			clearRememberedCredentials();
+		}
 	};
 
 	return (

@@ -224,10 +224,11 @@ export class AuthService {
 			}
 		}
 
-		// Vérification classique
+		// Vérification classique — token OU cookie + user obligatoire
+		const authToken = await AsyncStorage.getItem('auth_token');
 		const sessionCookie = await AsyncStorage.getItem('session_cookie');
 		const user = await AsyncStorage.getItem('user');
-		return !!sessionCookie && !!user;
+		return (!!authToken || !!sessionCookie) && !!user;
 	}
 
 	static async getCurrentUser(): Promise<User | null> {
@@ -262,10 +263,12 @@ export class AuthService {
 
 			// Vérification classique mobile
 			const authToken = await AsyncStorage.getItem('auth_token');
+			const sessionCookie = await AsyncStorage.getItem('session_cookie');
 			const user = await AsyncStorage.getItem('user');
 			const stayLoggedIn = await AsyncStorage.getItem('stayLoggedIn');
 
-			if (!authToken && !user) {
+			// Exige au minimum un credential (token OU cookie) ET un objet user
+			if ((!authToken && !sessionCookie) || !user) {
 				return false;
 			}
 
@@ -273,7 +276,7 @@ export class AuthService {
 			if (expiryStr) {
 				const expiry = new Date(expiryStr);
 				if (expiry < new Date()) {
-					this.clearSession();
+					await this.clearSession();
 					return false;
 				}
 			}

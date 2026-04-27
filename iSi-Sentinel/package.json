@@ -25,7 +25,6 @@
     "@react-navigation/native": "^7.0.14",
     "axios": "^1.8.4",
     "date-fns": "^4.1.0",
-    "eas-cli": "^16.4.1",
     "expo": "^54.0.0",
     "expo-blur": "~15.0.8",
     "expo-constants": "~18.0.13",

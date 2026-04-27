@@ -332,6 +332,12 @@ export class AuthService {
 		await AsyncStorage.removeItem('session_expiry');
 		await AsyncStorage.removeItem('stayLoggedIn');
 
+		if (Platform.OS === 'web') {
+			localStorage.removeItem('stayLoggedIn');
+			localStorage.removeItem('sessionExpiry');
+			localStorage.removeItem('user');
+		}
+
 		if (this.timeoutRef) {
 			clearTimeout(this.timeoutRef);
 			this.timeoutRef = null;

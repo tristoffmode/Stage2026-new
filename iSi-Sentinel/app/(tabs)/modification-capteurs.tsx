@@ -165,10 +165,8 @@ const ModificationCapteurs: React.FC = () => {
 	};
 
 	useEffect(() => {
-		if (capteurs.length > 0) {
-			const filtered = appliquerFiltres(capteurs, valeurFiltre, valeurEtablissement);
-			setCapteursFiltres(filtered);
-		}
+		const filtered = appliquerFiltres(capteurs, valeurFiltre, valeurEtablissement);
+		setCapteursFiltres(filtered);
 	}, [capteurs, valeurFiltre, valeurEtablissement, searchTerm]);
 
 	useEffect(() => {

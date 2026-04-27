@@ -159,8 +159,6 @@ const AffichageCapteurs: React.FC = () => {
 			const capteursData = await CapteurService.getCapteurs();
 
 			setCapteurs(capteursData);
-			const capteursFiltered = appliquerFiltres(capteursData, valeurFiltre, valeurEtablissement);
-			setCapteursFiltres(capteursFiltered);
 
 			console.log("Actualisation des données terminée");
 		} catch (error) {
@@ -184,10 +182,8 @@ const AffichageCapteurs: React.FC = () => {
 	}, []);
 
 	useEffect(() => {
-		if (capteurs.length > 0) {
-			const filtered = appliquerFiltres(capteurs, valeurFiltre, valeurEtablissement);
-			setCapteursFiltres(filtered);
-		}
+		const filtered = appliquerFiltres(capteurs, valeurFiltre, valeurEtablissement);
+		setCapteursFiltres(filtered);
 	}, [valeurFiltre, valeurEtablissement, capteurs, searchTerm]);
 
 	const onRefresh = async () => {

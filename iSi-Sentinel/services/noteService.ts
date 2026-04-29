@@ -21,8 +21,7 @@ export interface Note {
  * la suppression des notes.
  * 
  * @remarks
- * - Utilise Axios pour la plupart des requêtes API avec gestion automatique des cookies
- * - Utilise fetch pour la méthode de suppression
+ * - Utilise Axios pour toutes les requêtes API avec gestion automatique des cookies
  * - Gère les erreurs avec des alertes utilisateur et des logs console
  */
 

@@ -164,8 +164,6 @@ const AffichageCapteurs: React.FC = () => {
 		} catch (error) {
 			console.error('Erreur lors de la récupération des données:', error);
 			Alert.alert('Erreur', 'Impossible de rafraîchir les données des capteurs.');
-		} finally {
-			setRefreshing(false);
 		}
 	};
 
@@ -189,7 +187,11 @@ const AffichageCapteurs: React.FC = () => {
 	const onRefresh = async () => {
 		AuthService.resetTimeout(router);
 		setRefreshing(true);
-		await fetchData();
+		try {
+			await fetchData();
+		} finally {
+			setRefreshing(false);
+		}
 	};
 
 	const handleChangeFiltre = (value: string) => {

@@ -135,9 +135,22 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 			if (!selectedSite) return;
 
 			try {
-				const capteursData = await CapteurService.getCapteurs(parseInt(selectedSite));
-				if (capteursData && capteursData.length > 0) {
-					const options = capteursData.map(c => ({
+				const selectedSiteId = Number.parseInt(selectedSite, 10);
+				if (Number.isNaN(selectedSiteId)) {
+					setCapteurs([]);
+					setSelectedCapteur('');
+					setError('Site sélectionné invalide');
+					return;
+				}
+
+				const capteursData = await CapteurService.getCapteurs(selectedSiteId);
+				const selectedSiteLabel = sites.find(s => s.value === selectedSite)?.label;
+				const filteredCapteursData = selectedSiteLabel
+					? capteursData.filter(c => c.site_name === selectedSiteLabel)
+					: capteursData;
+
+				if (filteredCapteursData.length > 0) {
+					const options = filteredCapteursData.map(c => ({
 						label: c.name,
 						value: c.id.toString()
 					}));
@@ -145,6 +158,7 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 					setSelectedCapteur(options[0].value);
 				} else {
 					setCapteurs([]);
+					setSelectedCapteur('');
 					setError('Aucun capteur disponible pour ce site');
 				}
 			} catch (e: any) {
@@ -156,7 +170,7 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 		if (selectedSite) {
 			loadCapteurs();
 		}
-	}, [selectedSite]);
+	}, [selectedSite, sites]);
 
 	const loadCapteurData = useCallback(async () => {
 		if (!selectedCapteur || !selectedSite) return;

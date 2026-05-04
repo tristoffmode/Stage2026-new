@@ -1,5 +1,6 @@
 import React, { createContext, useState, useEffect, useCallback, useContext, useRef } from 'react';
 import { Alert } from 'react-native';
+import axios from 'axios';
 import { CapteurService } from '../services/capteurService';
 import { NoteService } from '../services/noteService';
 import { StatistiqueService } from '../services/statistiqueService';
@@ -108,6 +109,18 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 	const [filtersHeight, setFiltersHeight] = useState<number>(60);
 	const isLoadingCapteursRef = useRef(false);
 
+	const classifyError = (e: unknown): string => {
+		if (axios.isAxiosError(e)) {
+			const status = e.response?.status;
+			if (status === 401 || status === 403) return 'Session expirée. Veuillez vous reconnecter.';
+			if (status === 404) return 'Ressource introuvable.';
+			if (status != null && status >= 500) return 'Erreur serveur. Veuillez réessayer plus tard.';
+			if (e.code === 'ECONNABORTED') return 'La requête a expiré. Vérifiez votre connexion.';
+			if (!e.response) return 'Impossible de contacter le serveur. Vérifiez votre connexion.';
+		}
+		return 'Erreur lors du chargement des données.';
+	};
+
 	const resetStatData = useCallback(() => {
 		setLabels([]);
 		setTemperatureData([]);
@@ -143,9 +156,9 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 				} else {
 					setError('Aucun site disponible');
 				}
-			} catch (e: any) {
+			} catch (e: unknown) {
 				console.error('Erreur lors du chargement des sites:', e);
-				setError('Erreur lors du chargement des sites');
+				setError(classifyError(e));
 			}
 		};
 		loadSites();
@@ -165,7 +178,7 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 					isLoadingCapteursRef.current = false;
 					return;
 				}
-
+z``
 				const capteursData = await CapteurService.getCapteurs(selectedSiteId);
 				const selectedSiteLabel = sites.find(s => s.value === selectedSite)?.label;
 				const filteredCapteursData = selectedSiteLabel
@@ -185,10 +198,10 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 					setError('Aucun capteur disponible pour ce site');
 				}
 				isLoadingCapteursRef.current = false;
-			} catch (e: any) {
+			} catch (e: unknown) {
 				isLoadingCapteursRef.current = false;
 				console.error('Erreur lors du chargement des capteurs:', e);
-				setError('Erreur lors du chargement des capteurs');
+				setError(classifyError(e));
 			}
 		};
 
@@ -235,9 +248,9 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 			const capteurNotes = await NoteService.getNotes(parseInt(selectedCapteur));
 			setNotes(capteurNotes);
 
-		} catch (e: any) {
+		} catch (e: unknown) {
 			console.error('Error during data loading:', e);
-			setError(e.message || 'Erreur lors du chargement des données');
+			setError(classifyError(e));
 			setFallbackStatData();
 		} finally {
 			setLoading(false);

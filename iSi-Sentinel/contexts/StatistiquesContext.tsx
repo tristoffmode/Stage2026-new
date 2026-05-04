@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useCallback, useContext } from 'react';
+import React, { createContext, useState, useEffect, useCallback, useContext, useRef } from 'react';
 import { Alert } from 'react-native';
 import { CapteurService } from '../services/capteurService';
 import { NoteService } from '../services/noteService';
@@ -106,6 +106,27 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 	const [tableData, setTableData] = useState<ProcessedData[]>([]);
 	const [filtersExpanded, setFiltersExpanded] = useState<boolean>(false);
 	const [filtersHeight, setFiltersHeight] = useState<number>(60);
+	const isLoadingCapteursRef = useRef(false);
+
+	const resetStatData = useCallback(() => {
+		setLabels([]);
+		setTemperatureData([]);
+		setTemperatureMin([]);
+		setTemperatureMax([]);
+		setHumidityData([]);
+		setBatteryData([]);
+		setTableData([]);
+	}, []);
+
+	const setFallbackStatData = useCallback(() => {
+		setLabels([format(startDate, 'yyyy-MM-dd'), format(endDate, 'yyyy-MM-dd')]);
+		setTemperatureData([null, null]);
+		setTemperatureMin([null, null]);
+		setTemperatureMax([null, null]);
+		setHumidityData([null, null]);
+		setBatteryData([null, null]);
+		setTableData([]);
+	}, [startDate, endDate]);
 
 
 	useEffect(() => {
@@ -135,11 +156,13 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 			if (!selectedSite) return;
 
 			try {
+				isLoadingCapteursRef.current = true;
 				const selectedSiteId = Number.parseInt(selectedSite, 10);
 				if (Number.isNaN(selectedSiteId)) {
 					setCapteurs([]);
 					setSelectedCapteur('');
 					setError('Site sélectionné invalide');
+					isLoadingCapteursRef.current = false;
 					return;
 				}
 
@@ -161,7 +184,9 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 					setSelectedCapteur('');
 					setError('Aucun capteur disponible pour ce site');
 				}
+				isLoadingCapteursRef.current = false;
 			} catch (e: any) {
+				isLoadingCapteursRef.current = false;
 				console.error('Erreur lors du chargement des capteurs:', e);
 				setError('Erreur lors du chargement des capteurs');
 			}
@@ -178,14 +203,7 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 		try {
 			setLoading(true);
 			setError(null);
-
-			setLabels([]);
-			setTemperatureData([]);
-			setTemperatureMin([]);
-			setTemperatureMax([]);
-			setHumidityData([]);
-			setBatteryData([]);
-			setTableData([]);
+			resetStatData();
 
 			if (selectedCapteur === 'ALL') {
 				setError("L'affichage des statistiques n'est pas disponible pour l'option 'Tous les capteurs'.");
@@ -203,13 +221,7 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 			if (result.error) {
 				console.error('Error returned from StatService:', result.error);
 				setError(result.error);
-				setLabels([]);
-				setTemperatureData([]);
-				setTemperatureMin([]);
-				setTemperatureMax([]);
-				setHumidityData([]);
-				setBatteryData([]);
-				setTableData([]);
+				resetStatData();
 			} else {
 				setTableData(result.tableData || []);
 				setLabels(result.labels || []);
@@ -226,19 +238,12 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 		} catch (e: any) {
 			console.error('Error during data loading:', e);
 			setError(e.message || 'Erreur lors du chargement des données');
-
-			setLabels([format(startDate, 'yyyy-MM-dd'), format(endDate, 'yyyy-MM-dd')]);
-			setTemperatureData([null, null]);
-			setTemperatureMin([null, null]);
-			setTemperatureMax([null, null]);
-			setHumidityData([null, null]);
-			setBatteryData([null, null]);
-			setTableData([]);
+			setFallbackStatData();
 		} finally {
 			setLoading(false);
 			setRefreshing(false);
 		}
-	}, [selectedCapteur, selectedSite, startDate, endDate]);
+	}, [selectedCapteur, selectedSite, resetStatData, setFallbackStatData]);
 
 	const onRefresh = useCallback(() => {
 		setRefreshing(true);
@@ -260,6 +265,10 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 	};
 
 	useEffect(() => {
+		if (isLoadingCapteursRef.current) {
+			return;
+		}
+
 		if (selectedCapteur && selectedSite && startDate && endDate) {
 			loadCapteurData();
 		}

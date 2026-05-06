@@ -23,7 +23,6 @@ interface CapteurCardProps {
 	ouvrirModal?: (index: number) => void;
 	ouvrirModalNotes?: (index: number) => void; // Nouveau prop pour les notes
 	mode: 'affichage' | 'modification';
-	isGridView?: boolean;
 }
 
 /**

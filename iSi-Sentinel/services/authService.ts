@@ -188,26 +188,29 @@ export class AuthService {
 
 	static async logout() {
 		try {
-			await api.get('/logout', {
-				withCredentials: true
+			// API-first logout for mobile clients.
+			await api.post('/api/logout', {}, {
+				withCredentials: true,
+				headers: { Accept: 'application/json' }
 			});
-
+		} catch {
+			try {
+				// Legacy fallback route kept for old deployments.
+				await api.get('/logout', {
+					withCredentials: true,
+					headers: { Accept: 'application/json' }
+				});
+			} catch {
+				// Keep silent: local session clear is enough for UX.
+			}
+		} finally {
 			await this.clearSession();
 
 			api.defaults.headers.common['Authorization'] = '';
 			api.defaults.headers.common['Cookie'] = '';
-
-			return true;
-		} catch (error) {
-			console.error('Erreur lors de la déconnexion:', error);
-
-			await this.clearSession();
-
-			api.defaults.headers.common['Authorization'] = '';
-			api.defaults.headers.common['Cookie'] = '';
-
-			return false;
 		}
+
+		return true;
 	}
 
 	static async isAuthenticated(): Promise<boolean> {

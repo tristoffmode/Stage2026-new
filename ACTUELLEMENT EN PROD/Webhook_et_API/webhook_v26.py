@@ -18,6 +18,7 @@ import io
 import base64
 from fpdf import FPDF
 import tempfile
+from sqlalchemy import Index, inspect, text
 
 
 # Configurer le logging
@@ -53,7 +54,7 @@ class Config:
 app.config.from_object(Config())
 scheduler = APScheduler()
 scheduler.init_app(app)
-scheduler.start()  # Activer le scheduler pour les alertes automatiques
+#scheduler.start()  # Activer le scheduler pour les alertes automatiques
 
 # Middleware pour vérifier l'en-tête spécifique
 @app.before_request
@@ -71,6 +72,9 @@ except locale.Error:
     locale.setlocale(locale.LC_TIME, "")
 
 # Modèles de base de données
+REPORT_MAX_ROWS_PER_SENSOR = 20000
+
+
 class Site(db.Model):
     __tablename__ = 'site'
     id = db.Column(db.Integer, primary_key=True)
@@ -81,6 +85,9 @@ class Site(db.Model):
 
 class CapteurIoT(db.Model):
     __tablename__ = 'Capteur_IoT'
+    __table_args__ = (
+        Index('idx_capteur_site', 'ID_Site'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     ID_Site = db.Column(db.Integer, db.ForeignKey('site.id'), nullable=False)
     ID_EUI = db.Column(db.String(20), nullable=False)
@@ -91,6 +98,10 @@ class CapteurIoT(db.Model):
 
 class RelevesIoT(db.Model):
     __tablename__ = 'Releves_IoT'
+    __table_args__ = (
+        Index('idx_releves_capteur_site_datetime', 'ID_Capteur', 'ID_Site', 'Date_Time'),
+        Index('idx_releves_site_datetime', 'ID_Site', 'Date_Time'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     Date_Time = db.Column(db.DateTime, nullable=False)
     ID_Site = db.Column(db.Integer, db.ForeignKey('site.id'), nullable=False)
@@ -129,11 +140,56 @@ class NotificationSchedule(db.Model):
     
 class CapteurNotes(db.Model):
     __tablename__ = 'capteur_notes'
+    __table_args__ = (
+        Index('idx_capteur_notes_capteur_timestamp', 'capteur_id', 'timestamp'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     capteur_id = db.Column(db.Integer, db.ForeignKey('Capteur_IoT.id'), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now)
     note = db.Column(db.Text, nullable=False)
     capteur = db.relationship('CapteurIoT', backref='notes')
+
+
+def ensure_performance_indexes():
+    required_indexes = {
+        'Capteur_IoT': {
+            'idx_capteur_site': 'CREATE INDEX idx_capteur_site ON Capteur_IoT (ID_Site)',
+        },
+        'Releves_IoT': {
+            'idx_releves_capteur_site_datetime': (
+                'CREATE INDEX idx_releves_capteur_site_datetime '
+                'ON Releves_IoT (ID_Capteur, ID_Site, Date_Time)'
+            ),
+            'idx_releves_site_datetime': (
+                'CREATE INDEX idx_releves_site_datetime '
+                'ON Releves_IoT (ID_Site, Date_Time)'
+            ),
+        },
+        'capteur_notes': {
+            'idx_capteur_notes_capteur_timestamp': (
+                'CREATE INDEX idx_capteur_notes_capteur_timestamp '
+                'ON capteur_notes (capteur_id, timestamp)'
+            ),
+        },
+    }
+
+    try:
+        inspector = inspect(db.engine)
+        for table_name, indexes in required_indexes.items():
+            existing = {item.get('name') for item in inspector.get_indexes(table_name)}
+            for index_name, ddl in indexes.items():
+                if index_name in existing:
+                    continue
+                db.session.execute(text(ddl))
+                db.session.commit()
+                logging.info('Index cree: %s sur %s', index_name, table_name)
+    except Exception as e:
+        db.session.rollback()
+        logging.warning('Impossible de verifier/creer les indexes webhook: %s', str(e))
+
+
+with app.app_context():
+    ensure_performance_indexes()
 
 # Routes
 @app.route('/webhook', methods=['POST'])
@@ -212,32 +268,6 @@ def sanitize_excel_sheet_name(name):
         result = result.replace(char, '_')
     return result
 
-def parse_stats_range(data):
-    start_time_str = data.get('start_time')
-    end_time_str = data.get('end_time')
-
-    start_date = datetime.strptime(data['start_date'], '%Y-%m-%d')
-    if start_time_str:
-        start_time = datetime.strptime(start_time_str, '%H:%M').time()
-        start_date = datetime.combine(start_date.date(), start_time)
-
-    end_date = datetime.strptime(data['end_date'], '%Y-%m-%d')
-    if end_time_str:
-        end_time = datetime.strptime(end_time_str, '%H:%M').time()
-        display_end_date = datetime.combine(end_date.date(), end_time)
-        end_date = display_end_date + timedelta(minutes=1)
-    else:
-        display_end_date = end_date + timedelta(days=1) - timedelta(seconds=1)
-        end_date = end_date + timedelta(days=1)
-
-    if end_date <= start_date:
-        raise ValueError('La date et l\'heure de fin doivent être après la date et l\'heure de début')
-
-    return start_date, end_date, display_end_date
-
-def format_period_label(start_date, display_end_date):
-    return f"Du {start_date.strftime('%d/%m/%Y %H:%M')} au {display_end_date.strftime('%d/%m/%Y %H:%M')}"
-
 @app.route('/api/send_stats_email', methods=['POST'])
 def send_stats_email():
     try:
@@ -253,8 +283,8 @@ def send_stats_email():
         site_id = data['site_id']
         email = data['email']
 
-        start_date, end_date, display_end_date = parse_stats_range(data)
-        period_label = format_period_label(start_date, display_end_date)
+        start_date = datetime.strptime(data['start_date'], '%Y-%m-%d')
+        end_date = datetime.strptime(data['end_date'], '%Y-%m-%d') + timedelta(days=1)
 
         site = db.session.get(Site, site_id)
         if not site:
@@ -262,25 +292,42 @@ def send_stats_email():
             return jsonify({'success': False, 'message': 'Site non trouvé'}), 404
 
         if capteur_id == 'ALL':
-            return send_all_capteurs_stats(site, site_id, start_date, end_date, display_end_date, email)
+            return send_all_capteurs_stats(site, site_id, start_date, end_date, email)
 
         capteur = db.session.get(CapteurIoT, capteur_id)
         if not capteur:
             logging.error(f"Capteur non trouvé pour ID={capteur_id}")
             return jsonify({'success': False, 'message': 'Capteur non trouvé'}), 404
 
-        releves = RelevesIoT.query.filter(
+        releves = db.session.query(
+            RelevesIoT.Date_Time,
+            RelevesIoT.Temperature,
+            RelevesIoT.TX_Humidite,
+            RelevesIoT.Batterie,
+            RelevesIoT.rssi
+        ).filter(
             RelevesIoT.ID_Capteur == capteur_id,
             RelevesIoT.ID_Site == site_id,
             RelevesIoT.Date_Time >= start_date,
             RelevesIoT.Date_Time < end_date
-        ).order_by(RelevesIoT.Date_Time).all()
+        ).order_by(RelevesIoT.Date_Time).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
 
-        notes = db.session.query(CapteurNotes).filter(
+        releves_truncated = len(releves) > REPORT_MAX_ROWS_PER_SENSOR
+        if releves_truncated:
+            releves = releves[:REPORT_MAX_ROWS_PER_SENSOR]
+
+        notes = db.session.query(
+            CapteurNotes.timestamp,
+            CapteurNotes.note
+        ).filter(
             CapteurNotes.capteur_id == capteur_id,
             CapteurNotes.timestamp >= start_date,
             CapteurNotes.timestamp < end_date
-        ).order_by(CapteurNotes.timestamp).all()
+        ).order_by(CapteurNotes.timestamp).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
+
+        notes_truncated = len(notes) > REPORT_MAX_ROWS_PER_SENSOR
+        if notes_truncated:
+            notes = notes[:REPORT_MAX_ROWS_PER_SENSOR]
 
         # Générer le DataFrame pour Excel
         df_releves = pd.DataFrame([{
@@ -309,7 +356,7 @@ def send_stats_email():
         pdf.add_page()
         pdf.set_font("Arial", size=12)
         pdf.cell(0, 10, f"Statistiques du capteur {capteur.Nom_Capteur} - {site.Nom_Site}", ln=True)
-        pdf.cell(0, 10, f"Période: {period_label}", ln=True)
+        pdf.cell(0, 10, f"Période: {start_date.strftime('%d/%m/%Y')} au {(end_date - timedelta(days=1)).strftime('%d/%m/%Y')}", ln=True)
         pdf.ln(5)
 
         # Graphique uniquement
@@ -339,9 +386,17 @@ def send_stats_email():
             subject=f'Statistiques du capteur {capteur.Nom_Capteur} - {site.Nom_Site}',
             recipients=[email]
         )
+        truncation_notice = ""
+        if releves_truncated or notes_truncated:
+            truncation_notice = (
+                f"\n\nNote: rapport tronque a {REPORT_MAX_ROWS_PER_SENSOR} lignes maximum "
+                "par section pour garantir de bonnes performances."
+            )
+
         msg.body = f"""Bonjour,
 
 Veuillez trouver ci-joint les statistiques du capteur {capteur.Nom_Capteur} du site {site.Nom_Site}.
+{truncation_notice}
 
 Cordialement,
 I.S. Informatiques
@@ -351,13 +406,13 @@ https://is-informatiques.fr
 """
         # Attacher le PDF (graphique uniquement)
         msg.attach(
-            f"stats_{capteur.Nom_Capteur}_{start_date.strftime('%Y%m%d')}_au_{display_end_date.strftime('%Y%m%d')}.pdf",
+            f"stats_{capteur.Nom_Capteur}_{start_date.strftime('%Y%m%d')}_au_{(end_date - timedelta(days=1)).strftime('%Y%m%d')}.pdf",
             "application/pdf",
             pdf_bytes
         )
         # Attacher l'Excel (tableaux complets)
         msg.attach(
-            f"stats_{capteur.Nom_Capteur}_{start_date.strftime('%Y%m%d')}_au_{display_end_date.strftime('%Y%m%d')}.xlsx",
+            f"stats_{capteur.Nom_Capteur}_{start_date.strftime('%Y%m%d')}_au_{(end_date - timedelta(days=1)).strftime('%Y%m%d')}.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             excel_bytes
         )
@@ -500,7 +555,7 @@ def generate_temperature_plot(releves, capteur):
         return None
 
 
-def send_all_capteurs_stats(site, site_id, start_date, end_date, display_end_date, email):
+def send_all_capteurs_stats(site, site_id, start_date, end_date, email):
     try:
         capteurs = CapteurIoT.query.filter_by(ID_Site=site_id).all()
         if not capteurs:
@@ -515,19 +570,34 @@ def send_all_capteurs_stats(site, site_id, start_date, end_date, display_end_dat
                 # PDF
                 pdf = FPDF()
                 pdf.set_auto_page_break(auto=True, margin=15)
-                period_label = format_period_label(start_date, display_end_date)
                 for capteur in capteurs:
-                    releves = RelevesIoT.query.filter(
+                    releves = db.session.query(
+                        RelevesIoT.Date_Time,
+                        RelevesIoT.Temperature,
+                        RelevesIoT.TX_Humidite,
+                        RelevesIoT.Batterie,
+                        RelevesIoT.rssi
+                    ).filter(
                         RelevesIoT.ID_Capteur == capteur.id,
                         RelevesIoT.ID_Site == site_id,
                         RelevesIoT.Date_Time >= start_date,
                         RelevesIoT.Date_Time < end_date
-                    ).order_by(RelevesIoT.Date_Time).all()
-                    notes = db.session.query(CapteurNotes).filter(
+                    ).order_by(RelevesIoT.Date_Time).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
+
+                    if len(releves) > REPORT_MAX_ROWS_PER_SENSOR:
+                        releves = releves[:REPORT_MAX_ROWS_PER_SENSOR]
+
+                    notes = db.session.query(
+                        CapteurNotes.timestamp,
+                        CapteurNotes.note
+                    ).filter(
                         CapteurNotes.capteur_id == capteur.id,
                         CapteurNotes.timestamp >= start_date,
                         CapteurNotes.timestamp < end_date
-                    ).order_by(CapteurNotes.timestamp).all()
+                    ).order_by(CapteurNotes.timestamp).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
+
+                    if len(notes) > REPORT_MAX_ROWS_PER_SENSOR:
+                        notes = notes[:REPORT_MAX_ROWS_PER_SENSOR]
 
                     df_releves = pd.DataFrame([{
                         'Date': r.Date_Time.strftime('%Y-%m-%d'),
@@ -552,7 +622,7 @@ def send_all_capteurs_stats(site, site_id, start_date, end_date, display_end_dat
                     pdf.add_page()
                     pdf.set_font("Arial", size=12)
                     pdf.cell(0, 10, f"Capteur : {capteur.Nom_Capteur}", ln=True)
-                    pdf.cell(0, 10, f"Période: {period_label}", ln=True)
+                    pdf.cell(0, 10, f"Période: {start_date.strftime('%d/%m/%Y')} au {(end_date - timedelta(days=1)).strftime('%d/%m/%Y')}", ln=True)
                     pdf.ln(5)
 
                     # Graphique uniquement
@@ -694,7 +764,7 @@ def send_sms(capteur, temperature, humidity):
 
                 for phone_number in recipients:
                     try:
-                        url = "http://192.168.1.251:5000/send_sms"
+                        url = "http://192.168.1.28:5000/send_sms"
                         data = {'phone_number': phone_number, 'message': msg_body}
                         response = requests.post(url, json=data, timeout=10)
                         if response.status_code == 200:
@@ -773,7 +843,7 @@ def send_inactivity_alert(capteur):
 def check_inactive_sensors():
     try:
         with app.app_context():
-            cutoff_time = datetime.now() - timedelta(hours=1)
+            cutoff_time = datetime.now() - timedelta(minutes=31)
             inactive_sensors = CapteurIoT.query.filter(
                 CapteurIoT.last_updated < cutoff_time,
                 CapteurIoT.notif == True
@@ -809,6 +879,5 @@ def handle_exception(e):
     return jsonify({'error': str(e), 'traceback': traceback.format_exc().split("\n")}), 500
 
 if __name__ == '__main__':
-    logging.info("Démarrage du webhook sur *:5000")
-    app.run(debug=True, host='::', port=5000)
-
+    logging.info("Démarrage du webhook sur 0.0.0.0:5000")
+    app.run(debug=True, host='0.0.0.0', port=5000)

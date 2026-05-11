@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, url_for, render_template, Response, session
+from flask import Flask, request, jsonify, redirect, url_for, render_template, Response, session, g
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
@@ -7,8 +7,13 @@ from datetime import datetime, timedelta
 import traceback
 import logging
 import requests
+import uuid
+import time
 from jinja2.exceptions import TemplateNotFound
 from functools import wraps
+from sqlalchemy import and_, func, inspect, text
+from sqlalchemy import Index
+from collections import defaultdict, deque
 
 
 # Configurer le logging
@@ -45,6 +50,10 @@ class User(UserMixin, db.Model):
 
 class RelevesIoT(db.Model):
     __tablename__ = 'Releves_IoT'
+    __table_args__ = (
+        Index('idx_releves_capteur_site_datetime', 'ID_Capteur', 'ID_Site', 'Date_Time'),
+        Index('idx_releves_site_datetime', 'ID_Site', 'Date_Time'),
+    )
     id = db.Column(db.Integer, primary_key=True)
     Date_Time = db.Column(db.DateTime, nullable=False)
     ID_Site = db.Column(db.Integer, nullable=False)
@@ -82,22 +91,232 @@ class NotificationSchedule(db.Model):
 
 class CapteurNotes(db.Model):
     __tablename__ = 'capteur_notes'
+    __table_args__ = (
+        Index('idx_capteur_notes_capteur_timestamp', 'capteur_id', 'timestamp'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     capteur_id = db.Column(db.Integer, db.ForeignKey('Capteur_IoT.id'), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     note = db.Column(db.Text, nullable=False)
     capteur = db.relationship('CapteurIoT', backref='notes')
 
+
+def ensure_performance_indexes():
+    required_indexes = {
+        'Releves_IoT': {
+            'idx_releves_capteur_site_datetime': (
+                'CREATE INDEX idx_releves_capteur_site_datetime '
+                'ON Releves_IoT (ID_Capteur, ID_Site, Date_Time)'
+            ),
+            'idx_releves_site_datetime': (
+                'CREATE INDEX idx_releves_site_datetime '
+                'ON Releves_IoT (ID_Site, Date_Time)'
+            ),
+        },
+        'capteur_notes': {
+            'idx_capteur_notes_capteur_timestamp': (
+                'CREATE INDEX idx_capteur_notes_capteur_timestamp '
+                'ON capteur_notes (capteur_id, timestamp)'
+            ),
+        },
+    }
+
+    try:
+        inspector = inspect(db.engine)
+        for table_name, indexes in required_indexes.items():
+            existing = {item.get('name') for item in inspector.get_indexes(table_name)}
+            for index_name, ddl in indexes.items():
+                if index_name in existing:
+                    continue
+                db.session.execute(text(ddl))
+                db.session.commit()
+                logging.info('Index cree: %s sur %s', index_name, table_name)
+    except Exception as e:
+        db.session.rollback()
+        logging.warning('Impossible de verifier/creer les indexes de performance: %s', str(e))
+
+
+with server.app_context():
+    ensure_performance_indexes()
+
 @login_manager.user_loader
 def load_user(user_id):
     return db.session.get(User, int(user_id))
 
+
+class APIError(Exception):
+    def __init__(self, message, code='API_ERROR', status=400, details=None):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.status = status
+        self.details = details
+
+
+def api_success(data=None, message='OK', status=200):
+    payload = {
+        'success': True,
+        'message': message,
+        'data': data,
+        'request_id': getattr(g, 'request_id', None)
+    }
+    return jsonify(payload), status
+
+
+def api_error(message, code='API_ERROR', status=400, details=None):
+    payload = {
+        'success': False,
+        'error': {
+            'code': code,
+            'message': message,
+            'details': details
+        },
+        'request_id': getattr(g, 'request_id', None)
+    }
+    return jsonify(payload), status
+
+
+def parse_int(value, field_name, min_value=None, max_value=None):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise APIError(f'{field_name} doit etre un entier valide', code='INVALID_INPUT', status=400)
+
+    if min_value is not None and parsed < min_value:
+        raise APIError(f'{field_name} doit etre >= {min_value}', code='INVALID_INPUT', status=400)
+    if max_value is not None and parsed > max_value:
+        raise APIError(f'{field_name} doit etre <= {max_value}', code='INVALID_INPUT', status=400)
+    return parsed
+
+
+def parse_time_string(value, field_name):
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except (TypeError, ValueError):
+        raise APIError(f"{field_name} doit respecter le format HH:MM", code='INVALID_INPUT', status=400)
+
+
+def parse_datetime_bound(value, field_name, default_value=None, end_of_day=False):
+    if value is None or value == '':
+        return default_value
+
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d'):
+        try:
+            parsed = datetime.strptime(value, fmt)
+            if fmt == '%Y-%m-%d' and end_of_day:
+                return parsed + timedelta(days=1)
+            return parsed
+        except ValueError:
+            continue
+
+    raise APIError(
+        f"{field_name} doit respecter le format YYYY-MM-DD ou YYYY-MM-DD HH:MM:SS",
+        code='INVALID_INPUT',
+        status=400
+    )
+
+
+def compute_percentile(values, percentile):
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+
+    k = (len(ordered) - 1) * percentile
+    floor_idx = int(k)
+    ceil_idx = min(floor_idx + 1, len(ordered) - 1)
+    fraction = k - floor_idx
+    return float(ordered[floor_idx] + (ordered[ceil_idx] - ordered[floor_idx]) * fraction)
+
+
+def get_payload():
+    return request.get_json(silent=True) or {}
+
+
+ENDPOINT_METRICS = defaultdict(lambda: {
+    'durations_ms': deque(maxlen=5000),
+    'statuses': deque(maxlen=5000),
+    'rows_read': deque(maxlen=5000)
+})
+
+
+def get_authenticated_user():
+    if current_user.is_authenticated:
+        return current_user
+    return getattr(g, 'auth_user', None)
+
+
+def token_or_session_auth_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if current_user.is_authenticated:
+            return f(*args, **kwargs)
+
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return api_error('Authentification requise', code='AUTH_REQUIRED', status=401)
+
+        token = auth_header.split(' ', 1)[1]
+        import jwt
+
+        try:
+            payload = jwt.decode(token, server.config['SECRET_KEY'], algorithms=['HS256'])
+            user_id = payload.get('user_id')
+            user = db.session.get(User, user_id)
+            if not user:
+                return api_error('Utilisateur invalide', code='AUTH_INVALID', status=401)
+            g.auth_user = user
+            return f(*args, **kwargs)
+        except jwt.ExpiredSignatureError:
+            return api_error('Token expire', code='AUTH_EXPIRED', status=401)
+        except jwt.InvalidTokenError:
+            return api_error('Token invalide', code='AUTH_INVALID', status=401)
+
+    return decorated
+
+
 @server.before_request
-def check_api_auth():
-    if request.path.startswith('/api/') and not request.path == '/api/login':
-        if not current_user.is_authenticated:
-            if request.content_type == 'application/json' or request.headers.get('Accept') == 'application/json':
-                return jsonify({'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}), 401
+def attach_request_context():
+    g.request_id = request.headers.get('X-Request-Id') or str(uuid.uuid4())
+    g.request_start_time = time.perf_counter()
+
+    if request.path.startswith('/api/'):
+        logging.info(
+            "[request_id=%s] %s %s remote=%s",
+            g.request_id,
+            request.method,
+            request.path,
+            request.remote_addr
+        )
+
+
+@server.after_request
+def log_and_propagate_request_id(response):
+    request_id = getattr(g, 'request_id', None)
+    if request_id:
+        response.headers['X-Request-Id'] = request_id
+
+    if request.path.startswith('/api/'):
+        elapsed_ms = int((time.perf_counter() - g.request_start_time) * 1000)
+        endpoint_key = request.url_rule.rule if request.url_rule else request.path
+        metric_bucket = ENDPOINT_METRICS[endpoint_key]
+        metric_bucket['durations_ms'].append(elapsed_ms)
+        metric_bucket['statuses'].append(response.status_code)
+
+        rows_read = getattr(g, 'rows_read', None)
+        if rows_read is not None:
+            metric_bucket['rows_read'].append(int(rows_read))
+
+        logging.info(
+            "[request_id=%s] endpoint=%s completed status=%s duration_ms=%s rows_read=%s",
+            request_id,
+            endpoint_key,
+            response.status_code,
+            elapsed_ms,
+            rows_read if rows_read is not None else '-'
+        )
+    return response
 
 @server.before_request
 def check_inactivity():
@@ -128,15 +347,10 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        remember = str(request.form.get('remember', '0')).lower() in ('1', 'true', 'yes', 'on')
         logging.debug(f"Tentative de connexion avec username: {username}")
         user = User.query.filter_by(Nom_Personne=username).first()
         if user and bcrypt.check_password_hash(user.Mot_de_Passe, password):
-            login_user(user, remember=remember)
-            session.permanent = True
-            session['remember_me'] = remember
-            server.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30 if remember else 1)
-            session.modified = True
+            login_user(user)
             logging.info(f"Connexion réussie pour {username}")
             return redirect(url_for('index'))
         else:
@@ -154,7 +368,7 @@ def api_login():
     
     if not username or not password:
         logging.warning("Nom d'utilisateur ou mot de passe manquant")
-        return jsonify({"error": "Nom d'utilisateur et mot de passe requis"}), 400
+        return api_error("Nom d'utilisateur et mot de passe requis", code='INVALID_INPUT', status=400)
         
     user = User.query.filter_by(Nom_Personne=username).first()
     
@@ -179,41 +393,59 @@ def api_login():
         session.modified = True
         
         response = jsonify({
-            'success': True, 
+            'success': True,
+            'message': 'Connexion reussie',
             'user': {'id': user.id, 'username': user.Nom_Personne},
             'token': token,
-            'expiresAt': expiry.isoformat()
+            'expiresAt': expiry.isoformat(),
+            'request_id': getattr(g, 'request_id', None)
         })
         
         return response, 200
     
     logging.warning(f"Échec de connexion API pour {username}")
-    return jsonify({"error": "Nom d'utilisateur ou mot de passe incorrect"}), 401
+    return api_error("Nom d'utilisateur ou mot de passe incorrect", code='AUTH_INVALID', status=401)
 
 
 @server.route('/api/verify-session', methods=['GET'])
-@login_required
+@token_or_session_auth_required
 def verify_session():
-    # Prolonger la session si l'utilisateur est authentifié
+    user = get_authenticated_user()
+    if not user:
+        return api_error('Authentification requise', code='AUTH_REQUIRED', status=401)
+
     if current_user.is_authenticated:
-        # Marquer la session comme modifiée pour renouveler son cookie
         session.modified = True
-        
-    return jsonify({
-        'valid': True, 
+
+    return api_success({
+        'valid': True,
         'user': {
-            'id': current_user.id, 
-            'username': current_user.Nom_Personne
+            'id': user.id,
+            'username': user.Nom_Personne
         },
         'sessionExpires': (datetime.now() + server.config['PERMANENT_SESSION_LIFETIME']).isoformat()
-    }), 200
+    })
     
     
+@server.route('/api/logout', methods=['POST', 'GET'])
+@token_or_session_auth_required
+def api_logout():
+    # Clear both Flask-Login session and token-backed request context.
+    if current_user.is_authenticated:
+        logout_user()
+    session.clear()
+    if hasattr(g, 'auth_user'):
+        g.auth_user = None
+    return api_success({'logged_out': True}, message='Deconnexion reussie')
+
+
 @server.route('/logout')
 @login_required
 def logout():
     logout_user()
     session.clear()
+    if request.path.startswith('/api/') or request.headers.get('Accept') == 'application/json':
+        return api_success({'logged_out': True}, message='Deconnexion reussie')
     return redirect(url_for('login'))
 
 # Routes principales
@@ -226,71 +458,68 @@ def index():
         logging.error("Template index.html introuvable")
         return jsonify({'error': 'Template index.html not found'}), 500
 
-def parse_releves_range(start_date_str, end_date_str, start_time_str=None, end_time_str=None):
-    now = datetime.now()
-
-    if start_date_str:
-        if start_time_str:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-            start_time = datetime.strptime(start_time_str, '%H:%M').time()
-            start_date = datetime.combine(start_date.date(), start_time)
-        else:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-    else:
-        start_date = now - timedelta(days=7)
-
-    if end_date_str:
-        if end_time_str:
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-            end_time = datetime.strptime(end_time_str, '%H:%M').time()
-            end_date = datetime.combine(end_date.date(), end_time) + timedelta(minutes=1)
-        else:
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_date = now + timedelta(days=1)
-
-    if end_date <= start_date:
-        raise ValueError('La date et l\'heure de fin doivent être après la date et l\'heure de début')
-
-    return start_date, end_date
-
 @server.route('/api/releves', methods=['GET'])
-@login_required
+@token_or_session_auth_required
 def get_releves():
-    capteur_id = request.args.get('capteur_id')
-    if not capteur_id:
-        return jsonify({'error': 'Capteur ID is required'}), 400
-    site_id = request.args.get('site_id')
-    if not site_id:
-        return jsonify({'error': 'Site ID is required'}), 400
-    
-    # Récupérer les dates et heures de début et de fin des paramètres
-    start_date_str = request.args.get('start_date')
-    end_date_str = request.args.get('end_date')
-    start_time_str = request.args.get('start_time')
-    end_time_str = request.args.get('end_time')
-    
     try:
-        start_date, end_date = parse_releves_range(
-            start_date_str,
-            end_date_str,
-            start_time_str,
-            end_time_str,
+        capteur_id = parse_int(request.args.get('capteur_id'), 'capteur_id', min_value=1)
+        site_id = parse_int(request.args.get('site_id'), 'site_id', min_value=1)
+        start_date = parse_datetime_bound(
+            request.args.get('start_date'),
+            'start_date',
+            default_value=datetime.now() - timedelta(days=7),
+            end_of_day=False
         )
-            
-        # Filtrer les relevés par capteur, site, dates et heures
-        releves = RelevesIoT.query.filter(
+        end_date = parse_datetime_bound(
+            request.args.get('end_date'),
+            'end_date',
+            default_value=datetime.now() + timedelta(days=1),
+            end_of_day=True
+        )
+
+        if start_date >= end_date:
+            raise APIError('start_date doit etre inferieure a end_date', code='INVALID_INPUT', status=400)
+
+        page = parse_int(request.args.get('page', 1), 'page', min_value=1)
+        page_size = parse_int(request.args.get('page_size', 0), 'page_size', min_value=0, max_value=5000)
+
+        base_query = RelevesIoT.query.with_entities(
+            RelevesIoT.Date_Time,
+            RelevesIoT.Temperature,
+            RelevesIoT.TX_Humidite,
+            RelevesIoT.Batterie
+        ).filter(
             RelevesIoT.ID_Capteur == capteur_id,
             RelevesIoT.ID_Site == site_id,
             RelevesIoT.Date_Time >= start_date,
             RelevesIoT.Date_Time < end_date
-        ).order_by(RelevesIoT.Date_Time).all()
+        ).order_by(RelevesIoT.Date_Time.asc())
+
+        has_more = False
+        if page_size > 0:
+            offset = (page - 1) * page_size
+            releves = base_query.offset(offset).limit(page_size + 1).all()
+            has_more = len(releves) > page_size
+            if has_more:
+                releves = releves[:page_size]
+        else:
+            releves = base_query.all()
+            page = 1
         
         # Si aucun relevé n'est trouvé, retourner un tableau vide au lieu de chercher 
         # des données dans une autre période
         if not releves:
             logging.info(f"Aucun relevé trouvé pour la période {start_date} à {end_date}")
-            return jsonify([])
+            response_payload = {
+                'items': [],
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'has_more': False,
+                    'rows_read': 0
+                }
+            }
+            return api_success(response_payload)
             
         data = [
             {
@@ -301,22 +530,73 @@ def get_releves():
             }
             for releve in releves
         ]
-        return jsonify(data)
+
+        g.rows_read = len(data)
+        response_payload = {
+            'items': data,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'has_more': has_more,
+                'rows_read': len(data)
+            }
+        }
+        return api_success(response_payload)
+    except APIError as api_err:
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des relevés: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la recuperation des releves', code='INTERNAL_ERROR', status=500)
+
+
+@server.route('/api/metrics/endpoints', methods=['GET'])
+@token_or_session_auth_required
+def get_endpoint_metrics():
+    try:
+        items = []
+        for endpoint, metrics in ENDPOINT_METRICS.items():
+            durations = list(metrics['durations_ms'])
+            statuses = list(metrics['statuses'])
+            rows_read_values = list(metrics['rows_read'])
+
+            if not durations:
+                continue
+
+            total = len(durations)
+            status_4xx = sum(1 for code in statuses if 400 <= code < 500)
+            status_5xx = sum(1 for code in statuses if code >= 500)
+
+            items.append({
+                'endpoint': endpoint,
+                'requests': total,
+                'p50_ms': round(compute_percentile(durations, 0.50), 2),
+                'p95_ms': round(compute_percentile(durations, 0.95), 2),
+                'rate_4xx': round((status_4xx / total) * 100, 2),
+                'rate_5xx': round((status_5xx / total) * 100, 2),
+                'avg_rows_read': round(sum(rows_read_values) / len(rows_read_values), 2) if rows_read_values else 0.0
+            })
+
+        items.sort(key=lambda row: row['endpoint'])
+        return api_success(items)
+    except Exception as e:
+        logging.error(f"Erreur lors de la récupération des métriques endpoint: {str(e)}")
+        return api_error('Erreur interne lors de la recuperation des metriques', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/sites', methods=['GET'])
-@login_required
+@token_or_session_auth_required
 def get_sites():
     try:
-        user_name = current_user.Nom_Personne
+        user = get_authenticated_user()
+        if not user:
+            return api_error('Authentification requise', code='AUTH_REQUIRED', status=401)
+
+        user_name = user.Nom_Personne
         sites = db.session.query(Site).join(User, Site.id == User.ID_Site).filter(User.Nom_Personne == user_name).all()
         data = [{'id': site.id, 'name': site.Nom_Site} for site in sites]
-        return jsonify(data)
+        return api_success(data)
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des sites: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la recuperation des sites', code='INTERNAL_ERROR', status=500)
     
 def create_jwt_token(user_id, expiry):
     # Importer les modules nécessaires
@@ -363,26 +643,57 @@ def token_required(f):
     return decorated
 
 @server.route('/api/capteurs', methods=['GET'])
-@login_required
+@token_or_session_auth_required
 def get_capteurs():
     try:
-        user_name = current_user.Nom_Personne
+        user = get_authenticated_user()
+        if not user:
+            return api_error('Authentification requise', code='AUTH_REQUIRED', status=401)
+
+        user_name = user.Nom_Personne
         capteurs_query = db.session.query(CapteurIoT).join(User, CapteurIoT.ID_Site == User.ID_Site).filter(User.Nom_Personne == user_name)
         
         # Vérifier si un ID spécifique est demandé
         capteur_id = request.args.get('id')
         if capteur_id:
-            capteurs_query = capteurs_query.filter(CapteurIoT.id == int(capteur_id))
+            capteurs_query = capteurs_query.filter(CapteurIoT.id == parse_int(capteur_id, 'id', min_value=1))
             logging.info(f"Filtrage des capteurs par ID: {capteur_id}")
         
         site_id = request.args.get('site_id')
         if site_id:
-            capteurs_query = capteurs_query.filter(CapteurIoT.ID_Site == site_id)
+            capteurs_query = capteurs_query.filter(CapteurIoT.ID_Site == parse_int(site_id, 'site_id', min_value=1))
             
         capteurs = capteurs_query.all()
+        capteur_ids = [capteur.id for capteur in capteurs]
+
+        last_releves_by_capteur = {}
+        if capteur_ids:
+            latest_rows_subq = db.session.query(
+                RelevesIoT.ID_Capteur.label('capteur_id'),
+                func.max(RelevesIoT.Date_Time).label('max_date')
+            ).filter(
+                RelevesIoT.ID_Capteur.in_(capteur_ids)
+            ).group_by(RelevesIoT.ID_Capteur).subquery()
+
+            latest_rows = db.session.query(RelevesIoT).join(
+                latest_rows_subq,
+                and_(
+                    RelevesIoT.ID_Capteur == latest_rows_subq.c.capteur_id,
+                    RelevesIoT.Date_Time == latest_rows_subq.c.max_date
+                )
+            ).all()
+
+            last_releves_by_capteur = {row.ID_Capteur: row for row in latest_rows}
+
+        site_ids = {capteur.ID_Site for capteur in capteurs}
+        sites_by_id = {}
+        if site_ids:
+            sites = db.session.query(Site.id, Site.Nom_Site).filter(Site.id.in_(site_ids)).all()
+            sites_by_id = {site.id: site.Nom_Site for site in sites}
+
         data = []
         for capteur in capteurs:
-            last_releve = RelevesIoT.query.filter_by(ID_Capteur=capteur.id).order_by(RelevesIoT.Date_Time.desc()).first()
+            last_releve = last_releves_by_capteur.get(capteur.id)
             releve_info = {
                 'id': capteur.id,
                 'name': capteur.Nom_Capteur,
@@ -391,144 +702,186 @@ def get_capteurs():
                 'last_humidity': float(last_releve.TX_Humidite) if last_releve and last_releve.TX_Humidite else None,
                 'last_date': last_releve.Date_Time.strftime('%Y-%m-%d %H:%M:%S') if last_releve else None,
                 'last_minutes_ago': int((datetime.now() - last_releve.Date_Time).total_seconds() // 60) if last_releve else None,
-                'site_name': db.session.get(Site, capteur.ID_Site).Nom_Site,
+                'site_name': sites_by_id.get(capteur.ID_Site),
                 'battery_level': float(last_releve.Batterie) if last_releve and last_releve.Batterie else None,
                 'rssi': float(last_releve.rssi) if last_releve and last_releve.rssi else None,
                 'seuil_temperature': float(capteur.seuil_temperature) if capteur.seuil_temperature else None,
                 'euid': capteur.ID_EUI
             }
             data.append(releve_info)
-        return jsonify(data)
+        return api_success(data)
+    except APIError as api_err:
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des capteurs: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la recuperation des capteurs', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/toggle_monitoring', methods=['POST'])
-@login_required
+@token_or_session_auth_required
 def toggle_monitoring():
     try:
-        capteur_id = request.form.get('capteur_id')
-        if not capteur_id:
-            return jsonify({'error': 'Capteur ID is required'}), 400
+        capteur_id = parse_int(request.form.get('capteur_id'), 'capteur_id', min_value=1)
         capteur = CapteurIoT.query.get(capteur_id)
         if not capteur:
-            return jsonify({'error': 'Capteur not found'}), 404
+            return api_error('Capteur introuvable', code='NOT_FOUND', status=404)
         capteur.notif = not capteur.notif
         db.session.commit()
-        return jsonify({'success': True, 'notif': capteur.notif})
+        return api_success({'notif': capteur.notif}, message='Surveillance mise a jour')
+    except APIError as api_err:
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         logging.error(f"Erreur lors du toggle monitoring: {e}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la mise a jour de la surveillance', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/update_capteur', methods=['POST'])
-@login_required
+@token_or_session_auth_required
 def update_capteur():
     try:
-        capteur_id = request.json.get('capteur_id')
-        name = request.json.get('name')
-        seuil_temperature = request.json.get('seuil_temperature')
-        notif = request.json.get('notif')
-        days = request.json.get('days', [])
-        start_time = request.json.get('start_time')
-        end_time = request.json.get('end_time')
-        if not capteur_id:
-            return jsonify({'error': 'ID du capteur requis'}), 400
+        payload = get_payload()
+        capteur_id = parse_int(payload.get('capteur_id'), 'capteur_id', min_value=1)
+        name = payload.get('name')
+        seuil_temperature = payload.get('seuil_temperature')
+        notif = payload.get('notif')
+        days = payload.get('days', [])
+        start_time = payload.get('start_time')
+        end_time = payload.get('end_time')
+
         capteur = db.session.get(CapteurIoT, capteur_id)
         if not capteur:
-            return jsonify({'error': 'Capteur introuvable'}), 404
+            return api_error('Capteur introuvable', code='NOT_FOUND', status=404)
+
         if name:
+            if not isinstance(name, str) or len(name.strip()) < 2:
+                raise APIError('name doit contenir au moins 2 caracteres', code='INVALID_INPUT', status=400)
             capteur.Nom_Capteur = name
-        if seuil_temperature:
+
+        if seuil_temperature is not None and seuil_temperature != '':
             capteur.seuil_temperature = float(seuil_temperature)
+
         if notif is not None:
-            capteur.notif = (notif.lower() == 'true')
+            if isinstance(notif, bool):
+                capteur.notif = notif
+            elif isinstance(notif, str):
+                capteur.notif = notif.lower() == 'true'
+            else:
+                raise APIError('notif doit etre un booleen', code='INVALID_INPUT', status=400)
+
         db.session.commit()
+
         if days and start_time and end_time:
+            if not isinstance(days, list):
+                raise APIError('days doit etre une liste', code='INVALID_INPUT', status=400)
+            parsed_start = parse_time_string(start_time, 'start_time')
+            parsed_end = parse_time_string(end_time, 'end_time')
+            if parsed_start >= parsed_end:
+                raise APIError('start_time doit etre inferieur a end_time', code='INVALID_INPUT', status=400)
+
             for day in days:
+                if not isinstance(day, str) or not day.strip():
+                    raise APIError('Chaque jour doit etre une chaine non vide', code='INVALID_INPUT', status=400)
                 existing_schedule = NotificationSchedule.query.filter_by(capteur_id=capteur_id, day_of_week=day).first()
                 if existing_schedule:
-                    existing_schedule.start_time = start_time
-                    existing_schedule.end_time = end_time
+                    existing_schedule.start_time = parsed_start
+                    existing_schedule.end_time = parsed_end
                 else:
                     new_schedule = NotificationSchedule(
                         capteur_id=capteur_id,
                         day_of_week=day,
-                        start_time=start_time,
-                        end_time=end_time
+                        start_time=parsed_start,
+                        end_time=parsed_end
                     )
                     db.session.add(new_schedule)
             db.session.commit()
-        return jsonify({'success': True, 'message': 'Capteur et plages horaires mis à jour avec succès'})
+
+        return api_success({'capteur_id': capteur_id}, message='Capteur et plages horaires mis a jour')
+    except APIError as api_err:
+        db.session.rollback()
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erreur lors de la mise à jour du capteur: {e}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la mise a jour du capteur', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/update_schedule', methods=['POST'])
-@login_required
+@token_or_session_auth_required
 def update_schedule():
     try:
-        capteur_id = request.form.get('capteur_id')
+        capteur_id = parse_int(request.form.get('capteur_id'), 'capteur_id', min_value=1)
         day_of_week = request.form.get('day_of_week')
-        start_time = request.form.get('start_time')
-        end_time = request.form.get('end_time')
-        if not all([capteur_id, day_of_week, start_time, end_time]):
-            return jsonify({'error': 'Tous les champs sont requis'}), 400
+        start_time_raw = request.form.get('start_time')
+        end_time_raw = request.form.get('end_time')
+        if not all([day_of_week, start_time_raw, end_time_raw]):
+            return api_error('Tous les champs sont requis', code='INVALID_INPUT', status=400)
+
+        start_time = parse_time_string(start_time_raw, 'start_time')
+        end_time = parse_time_string(end_time_raw, 'end_time')
+        if start_time >= end_time:
+            raise APIError('start_time doit etre inferieur a end_time', code='INVALID_INPUT', status=400)
+
         schedule = NotificationSchedule.query.filter_by(capteur_id=capteur_id, day_of_week=day_of_week).first()
         if schedule:
-            schedule.start_time = datetime.strptime(start_time, "%H:%M").time()
-            schedule.end_time = datetime.strptime(end_time, "%H:%M").time()
+            schedule.start_time = start_time
+            schedule.end_time = end_time
         else:
             new_schedule = NotificationSchedule(
                 capteur_id=capteur_id,
                 day_of_week=day_of_week,
-                start_time=datetime.strptime(start_time, "%H:%M").time(),
-                end_time=datetime.strptime(end_time, "%H:%M").time()
+                start_time=start_time,
+                end_time=end_time
             )
             db.session.add(new_schedule)
         db.session.commit()
-        return jsonify({'success': True})
+        return api_success({'capteur_id': capteur_id, 'day_of_week': day_of_week}, message='Planning mis a jour')
+    except APIError as api_err:
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         logging.error(f"Erreur lors de la mise à jour du planning: {e}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la mise a jour du planning', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/update_all_schedules', methods=['POST'])
-@login_required
+@token_or_session_auth_required
 def update_all_schedules():
     try:
-        data = request.json
-        capteur_id = data.get('capteur_id')
-        schedules = data.get('schedules')
-        if not capteur_id:
-            return jsonify({'error': 'ID du capteur requis'}), 400
+        payload = get_payload()
+        capteur_id = parse_int(payload.get('capteur_id'), 'capteur_id', min_value=1)
+        schedules = payload.get('schedules')
         if schedules is None:
-            return jsonify({'error': 'Liste de planifications requise'}), 400
+            return api_error('Liste de planifications requise', code='INVALID_INPUT', status=400)
+        if not isinstance(schedules, list):
+            return api_error('schedules doit etre une liste', code='INVALID_INPUT', status=400)
+
         NotificationSchedule.query.filter_by(capteur_id=capteur_id).delete()
         for schedule in schedules:
             jour = schedule.get('jour')
             debut = schedule.get('debut')
             fin = schedule.get('fin')
             if jour and debut and fin:
+                parsed_debut = parse_time_string(debut, 'debut')
+                parsed_fin = parse_time_string(fin, 'fin')
+                if parsed_debut >= parsed_fin:
+                    raise APIError('debut doit etre inferieur a fin', code='INVALID_INPUT', status=400)
                 new_schedule = NotificationSchedule(
                     capteur_id=capteur_id,
                     day_of_week=jour,
-                    start_time=datetime.strptime(debut, "%H:%M").time(),
-                    end_time=datetime.strptime(fin, "%H:%M").time()
+                    start_time=parsed_debut,
+                    end_time=parsed_fin
                 )
                 db.session.add(new_schedule)
         db.session.commit()
-        return jsonify({'success': True, 'message': 'Toutes les planifications ont été mises à jour'})
+        return api_success({'capteur_id': capteur_id}, message='Toutes les planifications ont ete mises a jour')
+    except APIError as api_err:
+        db.session.rollback()
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erreur lors de la mise à jour des planifications: {e}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la mise a jour des planifications', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/get_schedules', methods=['GET'])
+@token_or_session_auth_required
 def get_schedules():
     try:
-        capteur_id = request.args.get('capteur_id')
-        if not capteur_id:
-            return jsonify({'error': 'Capteur ID requis'}), 400
+        capteur_id = parse_int(request.args.get('capteur_id'), 'capteur_id', min_value=1)
         schedules = NotificationSchedule.query.filter_by(capteur_id=capteur_id).all()
         all_days = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
         data = []
@@ -548,84 +901,115 @@ def get_schedules():
                     'end_time': None,
                     'message': 'Pas de notification'
                 })
-        return jsonify(data)
+        return api_success(data)
+    except APIError as api_err:
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des plannings: {e}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la recuperation des plannings', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/delete_schedule', methods=['POST'])
+@token_or_session_auth_required
 def delete_schedule():
     try:
-        schedule_id = request.json.get('schedule_id')
-        if not schedule_id:
-            return jsonify({'error': 'Schedule ID is required'}), 400
+        payload = get_payload()
+        schedule_id = parse_int(payload.get('schedule_id'), 'schedule_id', min_value=1)
         schedule = NotificationSchedule.query.get(schedule_id)
         if not schedule:
-            return jsonify({'error': 'Schedule not found'}), 404
+            return api_error('Schedule introuvable', code='NOT_FOUND', status=404)
         db.session.delete(schedule)
         db.session.commit()
-        return jsonify({'success': True, 'message': 'Schedule deleted successfully'})
+        return api_success({'schedule_id': schedule_id}, message='Schedule supprime avec succes')
+    except APIError as api_err:
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         logging.error(f"Erreur lors de la suppression du planning: {e}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la suppression du planning', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/capteur/notes', methods=['GET'])
+@token_or_session_auth_required
 def get_notes():
-    capteur_id = request.args.get('capteur_id')
-    if not capteur_id:
-        return jsonify({'error': 'Capteur ID requis'}), 400
-    notes = CapteurNotes.query.filter_by(capteur_id=capteur_id).order_by(CapteurNotes.timestamp.desc()).all()
-    return jsonify([
+    try:
+        capteur_id = parse_int(request.args.get('capteur_id'), 'capteur_id', min_value=1)
+        notes = CapteurNotes.query.filter_by(capteur_id=capteur_id).order_by(CapteurNotes.timestamp.desc()).all()
+        data = [
         {
             'id': note.id,
             'timestamp': note.timestamp.strftime('%Y-%m-%d %H:%M'),
             'note': note.note
         }
         for note in notes
-    ])
+        ]
+        return api_success(data)
+    except APIError as api_err:
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
 
 @server.route('/api/capteur/notes', methods=['POST'])
+@token_or_session_auth_required
 def add_note():
-    data = request.json
-    capteur_id = data.get('capteur_id')
-    timestamp = data.get('timestamp')
-    note_text = data.get('note')
-    if not capteur_id or not note_text:
-        return jsonify({'error': 'Données incomplètes'}), 400
-    note = CapteurNotes(capteur_id=capteur_id, timestamp=datetime.strptime(timestamp, '%Y-%m-%d %H:%M'), note=note_text)
-    db.session.add(note)
-    db.session.commit()
-    return jsonify({'success': True, 'message': 'Note ajoutée avec succès'})
+    try:
+        data = get_payload()
+        capteur_id = parse_int(data.get('capteur_id'), 'capteur_id', min_value=1)
+        timestamp = data.get('timestamp')
+        note_text = data.get('note')
+        if not note_text or not isinstance(note_text, str):
+            return api_error('note est requise', code='INVALID_INPUT', status=400)
+        if len(note_text.strip()) < 2:
+            return api_error('note trop courte', code='INVALID_INPUT', status=400)
+        parsed_timestamp = datetime.strptime(timestamp, '%Y-%m-%d %H:%M') if timestamp else datetime.utcnow()
+
+        note = CapteurNotes(capteur_id=capteur_id, timestamp=parsed_timestamp, note=note_text.strip())
+        db.session.add(note)
+        db.session.commit()
+        return api_success({'id': note.id}, message='Note ajoutee avec succes', status=201)
+    except APIError as api_err:
+        db.session.rollback()
+        return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
+    except ValueError:
+        db.session.rollback()
+        return api_error('timestamp doit respecter le format YYYY-MM-DD HH:MM', code='INVALID_INPUT', status=400)
+    except Exception:
+        db.session.rollback()
+        return api_error('Erreur interne lors de la creation de la note', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/capteur/notes/<int:note_id>', methods=['PUT'])
+@token_or_session_auth_required
 def update_note(note_id):
-    data = request.json
-    note_text = data.get('note')
-    note = CapteurNotes.query.get(note_id)
-    if not note:
-        return jsonify({'error': 'Note introuvable'}), 404
-    note.note = note_text
-    db.session.commit()
-    return jsonify({'success': True, 'message': 'Note mise à jour'})
+    try:
+        data = get_payload()
+        note_text = data.get('note')
+        if not note_text or not isinstance(note_text, str):
+            return api_error('note est requise', code='INVALID_INPUT', status=400)
+
+        note = CapteurNotes.query.get(note_id)
+        if not note:
+            return api_error('Note introuvable', code='NOT_FOUND', status=404)
+
+        note.note = note_text.strip()
+        db.session.commit()
+        return api_success({'id': note_id}, message='Note mise a jour')
+    except Exception:
+        db.session.rollback()
+        return api_error('Erreur interne lors de la mise a jour de la note', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/capteur/notes/<int:note_id>', methods=['DELETE'])
-@login_required
+@token_or_session_auth_required
 def delete_note(note_id):
     try:
         note = CapteurNotes.query.get(note_id)
         if not note:
-            return jsonify({'error': 'Note introuvable'}), 404
+            return api_error('Note introuvable', code='NOT_FOUND', status=404)
         db.session.delete(note)
         db.session.commit()
         logging.info(f"Note {note_id} supprimée avec succès")
-        return jsonify({'success': True, 'message': 'Note supprimée avec succès'})
+        return api_success({'id': note_id}, message='Note supprimee avec succes')
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erreur lors de la suppression de la note {note_id}: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de la suppression de la note', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/send_stats_email', methods=['POST'])
-@login_required
+@token_or_session_auth_required
 def proxy_send_stats_email():
     try:
         data = request.json
@@ -640,16 +1024,16 @@ def proxy_send_stats_email():
         )
     except Exception as e:
         logging.error(f"Erreur lors du proxy vers le webhook: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return api_error('Erreur interne lors de lenvoi dumail', code='INTERNAL_ERROR', status=500)
 
 @server.errorhandler(Exception)
 def handle_exception(e):
+    if isinstance(e, APIError):
+        return api_error(e.message, code=e.code, status=e.status, details=e.details)
+
     error_traceback = traceback.format_exc()
-    logging.error(f"🚨 ERREUR 500 🚨\n{error_traceback}")
-    return jsonify({
-        "error": str(e),
-        "traceback": error_traceback.split("\n")
-    }), 500
+    logging.error(f"[request_id={getattr(g, 'request_id', '-')}] ERREUR 500\n{error_traceback}")
+    return api_error('Erreur interne du serveur', code='INTERNAL_ERROR', status=500)
 
 if __name__ == '__main__':
     context = ('/etc/letsencrypt/live/iot.is-informatiques.fr/fullchain.pem', '/etc/letsencrypt/live/iot.is-informatiques.fr/privkey.pem')

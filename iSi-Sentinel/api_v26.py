@@ -427,11 +427,25 @@ def verify_session():
     })
     
     
+@server.route('/api/logout', methods=['POST', 'GET'])
+@token_or_session_auth_required
+def api_logout():
+    # Clear both Flask-Login session and token-backed request context.
+    if current_user.is_authenticated:
+        logout_user()
+    session.clear()
+    if hasattr(g, 'auth_user'):
+        g.auth_user = None
+    return api_success({'logged_out': True}, message='Deconnexion reussie')
+
+
 @server.route('/logout')
 @login_required
 def logout():
     logout_user()
     session.clear()
+    if request.path.startswith('/api/') or request.headers.get('Accept') == 'application/json':
+        return api_success({'logged_out': True}, message='Deconnexion reussie')
     return redirect(url_for('login'))
 
 # Routes principales

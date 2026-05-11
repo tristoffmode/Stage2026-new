@@ -11,7 +11,9 @@ import uuid
 import time
 from jinja2.exceptions import TemplateNotFound
 from functools import wraps
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, inspect, text
+from sqlalchemy import Index
+from collections import defaultdict, deque
 
 
 # Configurer le logging
@@ -48,6 +50,10 @@ class User(UserMixin, db.Model):
 
 class RelevesIoT(db.Model):
     __tablename__ = 'Releves_IoT'
+    __table_args__ = (
+        Index('idx_releves_capteur_site_datetime', 'ID_Capteur', 'ID_Site', 'Date_Time'),
+        Index('idx_releves_site_datetime', 'ID_Site', 'Date_Time'),
+    )
     id = db.Column(db.Integer, primary_key=True)
     Date_Time = db.Column(db.DateTime, nullable=False)
     ID_Site = db.Column(db.Integer, nullable=False)
@@ -85,11 +91,53 @@ class NotificationSchedule(db.Model):
 
 class CapteurNotes(db.Model):
     __tablename__ = 'capteur_notes'
+    __table_args__ = (
+        Index('idx_capteur_notes_capteur_timestamp', 'capteur_id', 'timestamp'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     capteur_id = db.Column(db.Integer, db.ForeignKey('Capteur_IoT.id'), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     note = db.Column(db.Text, nullable=False)
     capteur = db.relationship('CapteurIoT', backref='notes')
+
+
+def ensure_performance_indexes():
+    required_indexes = {
+        'Releves_IoT': {
+            'idx_releves_capteur_site_datetime': (
+                'CREATE INDEX idx_releves_capteur_site_datetime '
+                'ON Releves_IoT (ID_Capteur, ID_Site, Date_Time)'
+            ),
+            'idx_releves_site_datetime': (
+                'CREATE INDEX idx_releves_site_datetime '
+                'ON Releves_IoT (ID_Site, Date_Time)'
+            ),
+        },
+        'capteur_notes': {
+            'idx_capteur_notes_capteur_timestamp': (
+                'CREATE INDEX idx_capteur_notes_capteur_timestamp '
+                'ON capteur_notes (capteur_id, timestamp)'
+            ),
+        },
+    }
+
+    try:
+        inspector = inspect(db.engine)
+        for table_name, indexes in required_indexes.items():
+            existing = {item.get('name') for item in inspector.get_indexes(table_name)}
+            for index_name, ddl in indexes.items():
+                if index_name in existing:
+                    continue
+                db.session.execute(text(ddl))
+                db.session.commit()
+                logging.info('Index cree: %s sur %s', index_name, table_name)
+    except Exception as e:
+        db.session.rollback()
+        logging.warning('Impossible de verifier/creer les indexes de performance: %s', str(e))
+
+
+with server.app_context():
+    ensure_performance_indexes()
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -148,8 +196,49 @@ def parse_time_string(value, field_name):
         raise APIError(f"{field_name} doit respecter le format HH:MM", code='INVALID_INPUT', status=400)
 
 
+def parse_datetime_bound(value, field_name, default_value=None, end_of_day=False):
+    if value is None or value == '':
+        return default_value
+
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d'):
+        try:
+            parsed = datetime.strptime(value, fmt)
+            if fmt == '%Y-%m-%d' and end_of_day:
+                return parsed + timedelta(days=1)
+            return parsed
+        except ValueError:
+            continue
+
+    raise APIError(
+        f"{field_name} doit respecter le format YYYY-MM-DD ou YYYY-MM-DD HH:MM:SS",
+        code='INVALID_INPUT',
+        status=400
+    )
+
+
+def compute_percentile(values, percentile):
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+
+    k = (len(ordered) - 1) * percentile
+    floor_idx = int(k)
+    ceil_idx = min(floor_idx + 1, len(ordered) - 1)
+    fraction = k - floor_idx
+    return float(ordered[floor_idx] + (ordered[ceil_idx] - ordered[floor_idx]) * fraction)
+
+
 def get_payload():
     return request.get_json(silent=True) or {}
+
+
+ENDPOINT_METRICS = defaultdict(lambda: {
+    'durations_ms': deque(maxlen=5000),
+    'statuses': deque(maxlen=5000),
+    'rows_read': deque(maxlen=5000)
+})
 
 
 def get_authenticated_user():
@@ -210,11 +299,22 @@ def log_and_propagate_request_id(response):
 
     if request.path.startswith('/api/'):
         elapsed_ms = int((time.perf_counter() - g.request_start_time) * 1000)
+        endpoint_key = request.url_rule.rule if request.url_rule else request.path
+        metric_bucket = ENDPOINT_METRICS[endpoint_key]
+        metric_bucket['durations_ms'].append(elapsed_ms)
+        metric_bucket['statuses'].append(response.status_code)
+
+        rows_read = getattr(g, 'rows_read', None)
+        if rows_read is not None:
+            metric_bucket['rows_read'].append(int(rows_read))
+
         logging.info(
-            "[request_id=%s] completed status=%s duration_ms=%s",
+            "[request_id=%s] endpoint=%s completed status=%s duration_ms=%s rows_read=%s",
             request_id,
+            endpoint_key,
             response.status_code,
-            elapsed_ms
+            elapsed_ms,
+            rows_read if rows_read is not None else '-'
         )
     return response
 
@@ -350,24 +450,26 @@ def get_releves():
     try:
         capteur_id = parse_int(request.args.get('capteur_id'), 'capteur_id', min_value=1)
         site_id = parse_int(request.args.get('site_id'), 'site_id', min_value=1)
-        start_date_str = request.args.get('start_date')
-        end_date_str = request.args.get('end_date')
+        start_date = parse_datetime_bound(
+            request.args.get('start_date'),
+            'start_date',
+            default_value=datetime.now() - timedelta(days=7),
+            end_of_day=False
+        )
+        end_date = parse_datetime_bound(
+            request.args.get('end_date'),
+            'end_date',
+            default_value=datetime.now() + timedelta(days=1),
+            end_of_day=True
+        )
 
-        # Convertir les dates en objets datetime
-        if start_date_str:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-        else:
-            start_date = datetime.now() - timedelta(days=7)  # Par défaut: 7 jours en arrière
-            
-        if end_date_str:
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-            # Ajouter un jour à end_date pour inclure toute la journée
-            end_date = end_date + timedelta(days=1)
-        else:
-            end_date = datetime.now() + timedelta(days=1)  # Par défaut: maintenant
-            
-        # Filtrer les relevés par capteur, site ET dates
-        releves = RelevesIoT.query.with_entities(
+        if start_date >= end_date:
+            raise APIError('start_date doit etre inferieure a end_date', code='INVALID_INPUT', status=400)
+
+        page = parse_int(request.args.get('page', 1), 'page', min_value=1)
+        page_size = parse_int(request.args.get('page_size', 0), 'page_size', min_value=0, max_value=5000)
+
+        base_query = RelevesIoT.query.with_entities(
             RelevesIoT.Date_Time,
             RelevesIoT.Temperature,
             RelevesIoT.TX_Humidite,
@@ -377,13 +479,33 @@ def get_releves():
             RelevesIoT.ID_Site == site_id,
             RelevesIoT.Date_Time >= start_date,
             RelevesIoT.Date_Time < end_date
-        ).order_by(RelevesIoT.Date_Time.asc()).all()
+        ).order_by(RelevesIoT.Date_Time.asc())
+
+        has_more = False
+        if page_size > 0:
+            offset = (page - 1) * page_size
+            releves = base_query.offset(offset).limit(page_size + 1).all()
+            has_more = len(releves) > page_size
+            if has_more:
+                releves = releves[:page_size]
+        else:
+            releves = base_query.all()
+            page = 1
         
         # Si aucun relevé n'est trouvé, retourner un tableau vide au lieu de chercher 
         # des données dans une autre période
         if not releves:
             logging.info(f"Aucun relevé trouvé pour la période {start_date} à {end_date}")
-            return api_success([])
+            response_payload = {
+                'items': [],
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'has_more': False,
+                    'rows_read': 0
+                }
+            }
+            return api_success(response_payload)
             
         data = [
             {
@@ -394,12 +516,57 @@ def get_releves():
             }
             for releve in releves
         ]
-        return api_success(data)
+
+        g.rows_read = len(data)
+        response_payload = {
+            'items': data,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'has_more': has_more,
+                'rows_read': len(data)
+            }
+        }
+        return api_success(response_payload)
     except APIError as api_err:
         return api_error(api_err.message, code=api_err.code, status=api_err.status, details=api_err.details)
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des relevés: {str(e)}")
         return api_error('Erreur interne lors de la recuperation des releves', code='INTERNAL_ERROR', status=500)
+
+
+@server.route('/api/metrics/endpoints', methods=['GET'])
+@token_or_session_auth_required
+def get_endpoint_metrics():
+    try:
+        items = []
+        for endpoint, metrics in ENDPOINT_METRICS.items():
+            durations = list(metrics['durations_ms'])
+            statuses = list(metrics['statuses'])
+            rows_read_values = list(metrics['rows_read'])
+
+            if not durations:
+                continue
+
+            total = len(durations)
+            status_4xx = sum(1 for code in statuses if 400 <= code < 500)
+            status_5xx = sum(1 for code in statuses if code >= 500)
+
+            items.append({
+                'endpoint': endpoint,
+                'requests': total,
+                'p50_ms': round(compute_percentile(durations, 0.50), 2),
+                'p95_ms': round(compute_percentile(durations, 0.95), 2),
+                'rate_4xx': round((status_4xx / total) * 100, 2),
+                'rate_5xx': round((status_5xx / total) * 100, 2),
+                'avg_rows_read': round(sum(rows_read_values) / len(rows_read_values), 2) if rows_read_values else 0.0
+            })
+
+        items.sort(key=lambda row: row['endpoint'])
+        return api_success(items)
+    except Exception as e:
+        logging.error(f"Erreur lors de la récupération des métriques endpoint: {str(e)}")
+        return api_error('Erreur interne lors de la recuperation des metriques', code='INTERNAL_ERROR', status=500)
 
 @server.route('/api/sites', methods=['GET'])
 @token_or_session_auth_required

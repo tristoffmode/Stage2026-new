@@ -3,7 +3,7 @@
 import { format } from 'date-fns';
 import axios from 'axios';
 import { API_CONFIG } from '../constants/IpApi';
-import { unwrapApiData } from './apiResponse';
+import { getApiMessage, unwrapApiData } from './apiResponse';
 
 const API_URL = API_CONFIG.BASE_URL;
 
@@ -32,6 +32,18 @@ interface StatisticsResult {
 	error?: string;
 }
 
+interface RelevesPagination {
+	page: number;
+	page_size: number;
+	has_more: boolean;
+	rows_read: number;
+}
+
+interface RelevesPayload {
+	items?: any[];
+	pagination?: RelevesPagination;
+}
+
 /**
  * Service de statistiques pour l'application.
  * 
@@ -49,6 +61,9 @@ interface StatisticsResult {
  */
 
 export class StatistiqueService {
+	private static readonly PAGE_SIZE = 2000;
+	private static readonly MAX_PAGES = 20;
+
 	static axiosInstance = axios.create({
 		baseURL: API_URL,
 		withCredentials: true,
@@ -66,16 +81,7 @@ export class StatistiqueService {
 				end_date: format(params.end_date, 'yyyy-MM-dd')
 			});
 
-			const response = await this.axiosInstance.get('/api/releves', {
-				params: {
-					capteur_id: params.capteur_id,
-					site_id: params.site_id,
-					start_date: format(params.start_date, 'yyyy-MM-dd'),
-					end_date: format(params.end_date, 'yyyy-MM-dd')
-				}
-			});
-
-			let data = unwrapApiData<any[]>(response.data, []);
+			let data = await this.fetchAllRelevesPages(params);
 
 			if (!data || !Array.isArray(data) || data.length === 0) {
 				console.log('No data or invalid data received from API');
@@ -141,11 +147,49 @@ export class StatistiqueService {
 				console.error('Error response data:', error.response.data);
 				console.error('Error response status:', error.response.status);
 				console.error('Error response URL:', error.request?.responseURL);
+				console.error('Error message:', getApiMessage(error.response.data));
 			} else if (error.request) {
 				console.error('No response received:', error.request);
 			}
 			return this.emptyDailyResult(params.start_date, params.end_date);
 		}
+	}
+
+	private static async fetchAllRelevesPages(params: StatisticsParams): Promise<any[]> {
+		let page = 1;
+		let hasMore = true;
+		const merged: any[] = [];
+
+		while (hasMore && page <= this.MAX_PAGES) {
+			const response = await this.axiosInstance.get('/api/releves', {
+				params: {
+					capteur_id: params.capteur_id,
+					site_id: params.site_id,
+					start_date: format(params.start_date, 'yyyy-MM-dd'),
+					end_date: format(params.end_date, 'yyyy-MM-dd'),
+					page,
+					page_size: this.PAGE_SIZE
+				}
+			});
+
+			const payload = unwrapApiData<RelevesPayload | any[]>(response.data, []);
+			if (Array.isArray(payload)) {
+				merged.push(...payload);
+				hasMore = false;
+			} else {
+				const items = Array.isArray(payload?.items) ? payload.items : [];
+				merged.push(...items);
+				hasMore = Boolean(payload?.pagination?.has_more);
+			}
+
+			page += 1;
+		}
+
+		if (page > this.MAX_PAGES && hasMore) {
+			console.warn(`Statistics pagination stopped at ${this.MAX_PAGES} pages to protect mobile memory.`);
+		}
+
+		return merged;
 	}
 
 	private static emptyHourlyResult(): StatisticsResult {

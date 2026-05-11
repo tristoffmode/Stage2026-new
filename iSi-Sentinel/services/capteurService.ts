@@ -1,7 +1,7 @@
 import axios, { AxiosResponse } from 'axios';
 import { Alert } from 'react-native';
 import { API_CONFIG } from '../constants/IpApi';
-import { isApiSuccess, unwrapApiData } from './apiResponse';
+import { getApiMessage, isApiSuccess, unwrapApiData } from './apiResponse';
 
 const API_URL = API_CONFIG.BASE_URL;
 export interface Capteur {
@@ -162,10 +162,11 @@ export class CapteurService {
 	static async getReleves({ capteur_id, site_id }: { capteur_id: number, site_id: number }): Promise<any[]> {
 		try {
 			const response = await this.axiosInstance.get('/api/releves', {
-				params: { capteur_id, site_id }
+				params: { capteur_id, site_id, page: 1, page_size: 1000 }
 			});
 
-			const releves = unwrapApiData<any[]>(response.data, []);
+			const payload = unwrapApiData<any>(response.data, []);
+			const releves = Array.isArray(payload) ? payload : (Array.isArray(payload?.items) ? payload.items : []);
 
 			if (!releves || releves.length === 0) {
 				console.log('Aucune donnée reçue de l\'API pour ce capteur et cette période');
@@ -177,6 +178,7 @@ export class CapteurService {
 
 			if (error.response) {
 				console.error('Détails:', error.response.data);
+				console.error('Message API:', getApiMessage(error.response.data));
 			}
 
 			return [];

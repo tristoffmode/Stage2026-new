@@ -18,6 +18,7 @@ import io
 import base64
 from fpdf import FPDF
 import tempfile
+from sqlalchemy import Index, inspect, text
 
 
 # Configurer le logging
@@ -71,6 +72,9 @@ except locale.Error:
     locale.setlocale(locale.LC_TIME, "")
 
 # Modèles de base de données
+REPORT_MAX_ROWS_PER_SENSOR = 20000
+
+
 class Site(db.Model):
     __tablename__ = 'site'
     id = db.Column(db.Integer, primary_key=True)
@@ -81,6 +85,9 @@ class Site(db.Model):
 
 class CapteurIoT(db.Model):
     __tablename__ = 'Capteur_IoT'
+    __table_args__ = (
+        Index('idx_capteur_site', 'ID_Site'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     ID_Site = db.Column(db.Integer, db.ForeignKey('site.id'), nullable=False)
     ID_EUI = db.Column(db.String(20), nullable=False)
@@ -91,6 +98,10 @@ class CapteurIoT(db.Model):
 
 class RelevesIoT(db.Model):
     __tablename__ = 'Releves_IoT'
+    __table_args__ = (
+        Index('idx_releves_capteur_site_datetime', 'ID_Capteur', 'ID_Site', 'Date_Time'),
+        Index('idx_releves_site_datetime', 'ID_Site', 'Date_Time'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     Date_Time = db.Column(db.DateTime, nullable=False)
     ID_Site = db.Column(db.Integer, db.ForeignKey('site.id'), nullable=False)
@@ -129,11 +140,56 @@ class NotificationSchedule(db.Model):
     
 class CapteurNotes(db.Model):
     __tablename__ = 'capteur_notes'
+    __table_args__ = (
+        Index('idx_capteur_notes_capteur_timestamp', 'capteur_id', 'timestamp'),
+    )
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     capteur_id = db.Column(db.Integer, db.ForeignKey('Capteur_IoT.id'), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now)
     note = db.Column(db.Text, nullable=False)
     capteur = db.relationship('CapteurIoT', backref='notes')
+
+
+def ensure_performance_indexes():
+    required_indexes = {
+        'Capteur_IoT': {
+            'idx_capteur_site': 'CREATE INDEX idx_capteur_site ON Capteur_IoT (ID_Site)',
+        },
+        'Releves_IoT': {
+            'idx_releves_capteur_site_datetime': (
+                'CREATE INDEX idx_releves_capteur_site_datetime '
+                'ON Releves_IoT (ID_Capteur, ID_Site, Date_Time)'
+            ),
+            'idx_releves_site_datetime': (
+                'CREATE INDEX idx_releves_site_datetime '
+                'ON Releves_IoT (ID_Site, Date_Time)'
+            ),
+        },
+        'capteur_notes': {
+            'idx_capteur_notes_capteur_timestamp': (
+                'CREATE INDEX idx_capteur_notes_capteur_timestamp '
+                'ON capteur_notes (capteur_id, timestamp)'
+            ),
+        },
+    }
+
+    try:
+        inspector = inspect(db.engine)
+        for table_name, indexes in required_indexes.items():
+            existing = {item.get('name') for item in inspector.get_indexes(table_name)}
+            for index_name, ddl in indexes.items():
+                if index_name in existing:
+                    continue
+                db.session.execute(text(ddl))
+                db.session.commit()
+                logging.info('Index cree: %s sur %s', index_name, table_name)
+    except Exception as e:
+        db.session.rollback()
+        logging.warning('Impossible de verifier/creer les indexes webhook: %s', str(e))
+
+
+with app.app_context():
+    ensure_performance_indexes()
 
 # Routes
 @app.route('/webhook', methods=['POST'])
@@ -243,18 +299,35 @@ def send_stats_email():
             logging.error(f"Capteur non trouvé pour ID={capteur_id}")
             return jsonify({'success': False, 'message': 'Capteur non trouvé'}), 404
 
-        releves = RelevesIoT.query.filter(
+        releves = db.session.query(
+            RelevesIoT.Date_Time,
+            RelevesIoT.Temperature,
+            RelevesIoT.TX_Humidite,
+            RelevesIoT.Batterie,
+            RelevesIoT.rssi
+        ).filter(
             RelevesIoT.ID_Capteur == capteur_id,
             RelevesIoT.ID_Site == site_id,
             RelevesIoT.Date_Time >= start_date,
             RelevesIoT.Date_Time < end_date
-        ).order_by(RelevesIoT.Date_Time).all()
+        ).order_by(RelevesIoT.Date_Time).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
 
-        notes = db.session.query(CapteurNotes).filter(
+        releves_truncated = len(releves) > REPORT_MAX_ROWS_PER_SENSOR
+        if releves_truncated:
+            releves = releves[:REPORT_MAX_ROWS_PER_SENSOR]
+
+        notes = db.session.query(
+            CapteurNotes.timestamp,
+            CapteurNotes.note
+        ).filter(
             CapteurNotes.capteur_id == capteur_id,
             CapteurNotes.timestamp >= start_date,
             CapteurNotes.timestamp < end_date
-        ).order_by(CapteurNotes.timestamp).all()
+        ).order_by(CapteurNotes.timestamp).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
+
+        notes_truncated = len(notes) > REPORT_MAX_ROWS_PER_SENSOR
+        if notes_truncated:
+            notes = notes[:REPORT_MAX_ROWS_PER_SENSOR]
 
         # Générer le DataFrame pour Excel
         df_releves = pd.DataFrame([{
@@ -313,9 +386,17 @@ def send_stats_email():
             subject=f'Statistiques du capteur {capteur.Nom_Capteur} - {site.Nom_Site}',
             recipients=[email]
         )
+        truncation_notice = ""
+        if releves_truncated or notes_truncated:
+            truncation_notice = (
+                f"\n\nNote: rapport tronque a {REPORT_MAX_ROWS_PER_SENSOR} lignes maximum "
+                "par section pour garantir de bonnes performances."
+            )
+
         msg.body = f"""Bonjour,
 
 Veuillez trouver ci-joint les statistiques du capteur {capteur.Nom_Capteur} du site {site.Nom_Site}.
+{truncation_notice}
 
 Cordialement,
 I.S. Informatiques
@@ -490,17 +571,33 @@ def send_all_capteurs_stats(site, site_id, start_date, end_date, email):
                 pdf = FPDF()
                 pdf.set_auto_page_break(auto=True, margin=15)
                 for capteur in capteurs:
-                    releves = RelevesIoT.query.filter(
+                    releves = db.session.query(
+                        RelevesIoT.Date_Time,
+                        RelevesIoT.Temperature,
+                        RelevesIoT.TX_Humidite,
+                        RelevesIoT.Batterie,
+                        RelevesIoT.rssi
+                    ).filter(
                         RelevesIoT.ID_Capteur == capteur.id,
                         RelevesIoT.ID_Site == site_id,
                         RelevesIoT.Date_Time >= start_date,
                         RelevesIoT.Date_Time < end_date
-                    ).order_by(RelevesIoT.Date_Time).all()
-                    notes = db.session.query(CapteurNotes).filter(
+                    ).order_by(RelevesIoT.Date_Time).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
+
+                    if len(releves) > REPORT_MAX_ROWS_PER_SENSOR:
+                        releves = releves[:REPORT_MAX_ROWS_PER_SENSOR]
+
+                    notes = db.session.query(
+                        CapteurNotes.timestamp,
+                        CapteurNotes.note
+                    ).filter(
                         CapteurNotes.capteur_id == capteur.id,
                         CapteurNotes.timestamp >= start_date,
                         CapteurNotes.timestamp < end_date
-                    ).order_by(CapteurNotes.timestamp).all()
+                    ).order_by(CapteurNotes.timestamp).limit(REPORT_MAX_ROWS_PER_SENSOR + 1).all()
+
+                    if len(notes) > REPORT_MAX_ROWS_PER_SENSOR:
+                        notes = notes[:REPORT_MAX_ROWS_PER_SENSOR]
 
                     df_releves = pd.DataFrame([{
                         'Date': r.Date_Time.strftime('%Y-%m-%d'),

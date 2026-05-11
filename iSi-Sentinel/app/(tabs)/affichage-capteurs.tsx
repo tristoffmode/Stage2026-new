@@ -7,7 +7,7 @@ import DropdownFiltre from '../../components/DropdownFiltre';
 import ModalAjouterNote from '../../components/ModalAjouterNote';
 import { useRouter } from 'expo-router';
 import { AuthService } from '../../services/authService';
-import { CapteurService, Capteur, Site } from '../../services/capteurService';
+import { CapteurService, Capteur } from '../../services/capteurService';
 import styles from '../../styles/CapteurDashboardStyles';
 
 interface FiltreItem {
@@ -149,7 +149,7 @@ const AffichageCapteurs: React.FC = () => {
 
 			setElementsEtablissement([
 				{ label: 'Tous les établissements', value: '' },
-				...sitesData.map((site: Site) => ({
+				...sitesData.map((site) => ({
 					label: site.name,
 					value: site.name,
 				}))

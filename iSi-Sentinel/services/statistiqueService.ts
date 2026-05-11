@@ -357,9 +357,9 @@ export class StatistiqueService {
 
 	static async getSensorThreshold(capteurId: number): Promise<number | null> {
 		try {
-			const url = `/api/capteurs?id=${capteurId}`;
-
-			const response = await this.axiosInstance.get(url);
+			const response = await this.axiosInstance.get('/api/capteurs', {
+				params: { id: capteurId }
+			});
 
 			if (response.data && response.data.length > 0) {
 				const seuil = response.data[0].seuil_temperature;

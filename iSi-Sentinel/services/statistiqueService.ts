@@ -3,6 +3,7 @@
 import { format } from 'date-fns';
 import axios from 'axios';
 import { API_CONFIG } from '../constants/IpApi';
+import { unwrapApiData } from './apiResponse';
 
 const API_URL = API_CONFIG.BASE_URL;
 
@@ -74,7 +75,7 @@ export class StatistiqueService {
 				}
 			});
 
-			let data = response.data;
+			let data = unwrapApiData<any[]>(response.data, []);
 
 			if (!data || !Array.isArray(data) || data.length === 0) {
 				console.log('No data or invalid data received from API');
@@ -361,8 +362,9 @@ export class StatistiqueService {
 				params: { id: capteurId }
 			});
 
-			if (response.data && response.data.length > 0) {
-				const seuil = response.data[0].seuil_temperature;
+			const capteurs = unwrapApiData<any[]>(response.data, []);
+			if (capteurs.length > 0) {
+				const seuil = capteurs[0].seuil_temperature;
 				const seuilNumber = seuil !== null && seuil !== undefined ? Number(seuil) : null;
 				return seuilNumber;
 			}

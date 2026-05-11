@@ -2,6 +2,7 @@ import axios, { AxiosResponse } from 'axios';
 import { format } from 'date-fns';
 import { Alert } from 'react-native';
 import { API_CONFIG } from '../constants/IpApi';
+import { isApiSuccess, unwrapApiData } from './apiResponse';
 
 const API_URL = API_CONFIG.BASE_URL;
 
@@ -40,7 +41,7 @@ export class NoteService {
 			const response: AxiosResponse = await this.axiosInstance.get(
 				`/api/capteur/notes?capteur_id=${capteurId}`
 			);
-			return response.data;
+			return unwrapApiData<Note[]>(response.data, []);
 		} catch (error: any) {
 			console.error('Erreur lors de la récupération des notes:', error);
 			Alert.alert('Erreur', 'Impossible de récupérer les notes du capteur.');
@@ -61,7 +62,7 @@ export class NoteService {
 				}
 			);
 
-			if (response.data.success) {
+			if (isApiSuccess(response.data)) {
 				Alert.alert('Succès', 'Note ajoutée avec succès.');
 				return true;
 			}
@@ -104,7 +105,7 @@ export class NoteService {
 				}
 			);
 
-			if (response.data.success) {
+			if (isApiSuccess(response.data)) {
 				Alert.alert('Succès', 'Note mise à jour avec succès.');
 				return true;
 			}

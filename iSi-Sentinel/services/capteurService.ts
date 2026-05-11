@@ -1,6 +1,7 @@
 import axios, { AxiosResponse } from 'axios';
 import { Alert } from 'react-native';
 import { API_CONFIG } from '../constants/IpApi';
+import { isApiSuccess, unwrapApiData } from './apiResponse';
 
 const API_URL = API_CONFIG.BASE_URL;
 export interface Capteur {
@@ -57,8 +58,9 @@ export class CapteurService {
 					...(siteId ? { site_id: siteId } : {})
 				}
 			});
-			console.log(`${response.data.length} capteurs récupérés`);
-			return response.data;
+			const capteurs = unwrapApiData<Capteur[]>(response.data, []);
+			console.log(`${capteurs.length} capteurs récupérés`);
+			return capteurs;
 		} catch (error: any) {
 			console.error('Erreur lors de la récupération des capteurs:', error);
 			if (error.response) {
@@ -75,7 +77,7 @@ export class CapteurService {
 	static async getSites(): Promise<Site[]> {
 		try {
 			const response: AxiosResponse = await this.axiosInstance.get('/api/sites');
-			return response.data;
+			return unwrapApiData<Site[]>(response.data, []);
 		} catch (error: any) {
 			console.error('Erreur lors de la récupération des sites:', error);
 			if (error.response) {
@@ -104,8 +106,9 @@ export class CapteurService {
 				}
 			);
 
-			if (response.data.success) {
-				return response.data.notif;
+			if (isApiSuccess(response.data)) {
+				const payload = unwrapApiData<{ notif?: boolean }>(response.data, {});
+				return Boolean(payload.notif);
 			}
 			return false;
 		} catch (error: any) {
@@ -137,7 +140,7 @@ export class CapteurService {
 
 			console.log('Réponse de mise à jour:', response.data);
 
-			if (response.data.success) {
+			if (isApiSuccess(response.data)) {
 				return true;
 			}
 			return false;
@@ -162,11 +165,13 @@ export class CapteurService {
 				params: { capteur_id, site_id }
 			});
 
-			if (!response.data || response.data.length === 0) {
+			const releves = unwrapApiData<any[]>(response.data, []);
+
+			if (!releves || releves.length === 0) {
 				console.log('Aucune donnée reçue de l\'API pour ce capteur et cette période');
 			}
 
-			return response.data || [];
+			return releves || [];
 		} catch (error: any) {
 			console.error('Erreur lors de la récupération des relevés:', error);
 

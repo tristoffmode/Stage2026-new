@@ -178,7 +178,7 @@ export const StatistiquesProvider: React.FC<{ children: React.ReactNode }> = ({ 
 					isLoadingCapteursRef.current = false;
 					return;
 				}
-z``
+
 				const capteursData = await CapteurService.getCapteurs(selectedSiteId);
 				const selectedSiteLabel = sites.find(s => s.value === selectedSite)?.label;
 				const filteredCapteursData = selectedSiteLabel

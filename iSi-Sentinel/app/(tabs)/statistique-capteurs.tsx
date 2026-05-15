@@ -18,6 +18,7 @@ const StatistiqueCapteurs = () => {
 	const isWeb = Platform.OS === 'web';
 	const buttonBottomPosition = isWeb ? 22 : (insets.bottom + 16);
 	const topOffset = isWeb ? Math.max(64, headerHeight) : Math.max(8, headerHeight - 56);
+	const webButtonTop = topOffset + 10;
 
 	return (
 		<View style={styles.safeArea}>
@@ -35,20 +36,30 @@ const StatistiqueCapteurs = () => {
 				<View
 					style={[
 						styles.boutonContainer,
-						{
-							bottom: buttonBottomPosition,
-							position: 'absolute',
-							zIndex: 999,
-						}
+						isWeb
+							? {
+								top: webButtonTop,
+								left: 0,
+								right: 16,
+								alignItems: 'flex-end',
+								position: 'absolute',
+								zIndex: 999,
+							}
+							: {
+								bottom: buttonBottomPosition,
+								position: 'absolute',
+								zIndex: 999,
+							}
 					]}
 					pointerEvents="box-none"
 				>
 					<TouchableOpacity
-						style={styles.boutonEnvoiMail}
+						style={[styles.boutonEnvoiMail, isWeb && styles.boutonEnvoiMailWeb]}
 						onPress={() => setModalVisible(true)}
+						accessibilityLabel="Envoyer les statistiques par email"
 					>
-						<MaterialIcons name="email" size={24} color="#fff" />
-						<Text style={styles.texteBouton}>Envoyer</Text>
+						<MaterialIcons name="email" size={isWeb ? 20 : 24} color="#fff" />
+						{!isWeb && <Text style={styles.texteBouton}>Envoyer</Text>}
 					</TouchableOpacity>
 				</View>
 
@@ -90,6 +101,13 @@ const styles = StyleSheet.create({
 		flexDirection: 'row',
 		alignItems: 'center',
 		justifyContent: 'center',
+	},
+	boutonEnvoiMailWeb: {
+		height: 44,
+		width: 44,
+		minWidth: 44,
+		paddingHorizontal: 0,
+		borderRadius: 22,
 	},
 	texteBouton: {
 		color: '#ffffff',
